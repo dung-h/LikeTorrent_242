@@ -1,0 +1,5 @@
+# File: config.py
+PIECE_SIZE = 512 * 1024  # 512 KB
+TRACKER_PORT = 8000
+PEER_PORT = 6881
+DOWNLOAD_DIR = "downloads"

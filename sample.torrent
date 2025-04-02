@@ -1,0 +1,1 @@
+{"tracker": "http://localhost:8000", "files": [{"path": "sample.txt", "length": 19}], "piece_length": 524288, "pieces": ["dc004f97b1c19dd5e4d19b48aa89b50213e48b18"], "torrent_hash": "162bd97d1564ebc9fd22bc78eaa23281cfc38401"}
