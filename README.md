@@ -8,3 +8,5 @@ A simple BitTorrent-like application built for the Computer Networks course.
    from metainfo import Metainfo
    meta = Metainfo("sample.txt", "http://localhost:8000")
    meta.save("sample.torrent")
+# LikeTorrent_242
+
