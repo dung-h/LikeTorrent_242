@@ -12,10 +12,10 @@ import os
 import requests
 
 class TorrentClient:
-    def __init__(self, torrent_file):
+    def __init__(self, torrent_file, is_seeder=False):
         self.metainfo = Metainfo.load(torrent_file)
         self.peer_id = hashlib.sha1(str(time.time()).encode()).hexdigest()[:20]
-        self.piece_manager = PieceManager(self.metainfo.to_dict())
+        self.piece_manager = PieceManager(self.metainfo.to_dict(), is_seeder=is_seeder)
         self.peers = []
         
         # Find an available port
@@ -61,25 +61,37 @@ class TorrentClient:
     #     self.peers = response["peers"]
     #     sock.close()
 
-   
-
     def contact_tracker(self):
         try:
-            tracker_url = self.metainfo["tracker"] + "/announce"
+            base_url = self.metainfo["tracker"].rstrip('/')
+            tracker_url = f"{base_url}/announce"
             print(f"Connecting to tracker at {tracker_url}")
             
-            request_data = {
+            # Use GET instead of POST (since GET is more compatible with proxies)
+            params = {
                 "torrent_hash": self.metainfo["torrent_hash"],
                 "peer_id": self.peer_id,
                 "port": self.port,
                 "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"]
             }
             
-            response = requests.post(tracker_url, json=request_data, timeout=30)
+            headers = {
+                "User-Agent": "LikeTorrent/1.0",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
+            print("Sending tracker request:", params)
+            response = requests.get(tracker_url, params=params, headers=headers, timeout=30)
+            print(f"Response status: {response.status_code}")
+            
             if response.status_code == 200:
-                self.peers = response.json()["peers"]
+                resp_data = response.json()
+                print(f"Tracker response: {resp_data}")
+                self.peers = resp_data["peers"]
+                print(f"Received {len(self.peers)} peers from tracker")
             else:
                 print(f"Error response from tracker: {response.status_code}")
+                print(f"Response text: {response.text}")
                 
         except Exception as e:
             print(f"Error connecting to tracker: {e}")
@@ -113,6 +125,13 @@ class TorrentClient:
         # No need to join threads here as we've already joined them above
     def handle_upload(self, conn, addr):
         try:
+            file_path = self.metainfo["files"][0]["path"]
+            print(f"Original file path: {file_path}")
+            print(f"File exists at original location: {os.path.exists(file_path)}")
+            print(f"File exists in downloads: {os.path.exists(os.path.join('downloads', file_path))}")
+            
+            # Keep the connection open for multiple messages
+            conn.settimeout(10)
             data = conn.recv(1024).decode()
             print(f"Upload request from {addr}: {data}")
             
@@ -120,48 +139,49 @@ class TorrentClient:
                 conn.send("ESTABLISHED".encode())
                 print(f"Connection established with {addr}")
                 
-            elif "REQUEST" in data:
-                piece_index = int(data.split(":")[1])
-                print(f"Received request for piece {piece_index} from {addr}")
-                
-                # Determine file path
-                file_path = self.metainfo["files"][0]["path"]
-                if os.path.exists(os.path.join("downloads", file_path)):
-                    file_path = os.path.join("downloads", file_path)
-                    print(f"Using downloaded file: {file_path}")
-                else:
-                    print(f"Using original file: {file_path}")
-                
+                # Wait for the REQUEST message after ESTABLISH
                 try:
-                    with open(file_path, "rb") as f:
-                        f.seek(piece_index * self.metainfo["piece_length"])
-                        piece_data = f.read(self.metainfo["piece_length"])
-                        print(f"Read {len(piece_data)} bytes for piece {piece_index}")
+                    data = conn.recv(1024).decode()
+                    print(f"Follow-up request from {addr}: {data}")
+                    
+                    if "REQUEST" in data:
+                        piece_index = int(data.split(":")[1])
+                        print(f"Received request for piece {piece_index} from {addr}")
                         
-                        # Send in small chunks
-                        chunk_size = 1024
-                        for i in range(0, len(piece_data), chunk_size):
-                            chunk = piece_data[i:i+chunk_size]
-                            bytes_sent = conn.send(chunk)
-                            print(f"Sent {bytes_sent} bytes to {addr}")
-                            time.sleep(0.005)  # Small delay to avoid overwhelming the socket
+                        # Determine file path - USE ABSOLUTE PATH for clarity
+                        actual_path = os.path.abspath(file_path)
+                        print(f"Looking for file at: {actual_path}")
                         
-                        print(f"Finished sending piece {piece_index}, total {len(piece_data)} bytes")
-                except FileNotFoundError:
-                    print(f"ERROR: File not found: {file_path}")
-                    conn.send(b"FILE_NOT_FOUND")
+                        # For seeders, prefer original file, not downloads
+                        if os.path.exists(actual_path):
+                            print(f"Using original file: {actual_path}")
+                            with open(actual_path, "rb") as f:
+                                f.seek(piece_index * self.metainfo["piece_length"])
+                                piece_data = f.read(self.metainfo["piece_length"])
+                                print(f"Read {len(piece_data)} bytes for piece {piece_index}")
+                                
+                                # Send in smaller chunks with explicit flush
+                                chunk_size = 1024
+                                total_sent = 0
+                                for i in range(0, len(piece_data), chunk_size):
+                                    chunk = piece_data[i:i+chunk_size]
+                                    bytes_sent = conn.send(chunk)
+                                    total_sent += bytes_sent
+                                    print(f"Sent {bytes_sent} bytes, total: {total_sent}/{len(piece_data)}")
+                                    time.sleep(0.01)  # Small delay to prevent overwhelming
+                                
+                                print(f"COMPLETE: Sent {total_sent} bytes for piece {piece_index}")
                 except Exception as e:
-                    print(f"ERROR reading/sending file: {e}")
-                    conn.send(b"ERROR")
-            
-            # Keep connection open briefly
-            time.sleep(0.5)
+                    print(f"Error while handling request: {e}")
             
         except Exception as e:
             print(f"Upload error from {addr}: {e}")
         finally:
+            # Give time before closing
+            time.sleep(0.5)
             print(f"Closing connection with {addr}")
             conn.close()
+            
     
     def start_upload(self):
         print(f"Starting upload server on port {self.port}")

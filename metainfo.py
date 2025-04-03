@@ -28,8 +28,11 @@ class Metainfo:
                 pieces.append(hashlib.sha1(piece).hexdigest())
         return pieces
     # Add this method to the Metainfo class, just after the save method
+    # In metainfo.py, modify the __getitem__ method
     def __getitem__(self, key):
         # This allows dictionary-style access: metainfo["pieces"]
+        if key == "tracker":
+            return self.tracker_url
         return getattr(self, key)
     
     @staticmethod

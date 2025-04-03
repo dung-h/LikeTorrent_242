@@ -3,7 +3,7 @@ import os
 from config import PIECE_SIZE, DOWNLOAD_DIR
 
 class PieceManager:
-    def __init__(self, metainfo):
+    def __init__(self, metainfo, is_seeder=False):
         self.metainfo = metainfo
         self.total_pieces = len(metainfo["pieces"])
         self.have_pieces = [False] * self.total_pieces
@@ -11,9 +11,12 @@ class PieceManager:
         self.download_dir = DOWNLOAD_DIR
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self.output_file = os.path.join(DOWNLOAD_DIR, self.files[0]["path"])
-        # Initialize empty file
-        with open(self.output_file, "wb") as f:
-            f.truncate(self.files[0]["length"])
+        
+        # Only create empty file for downloaders, not seeders
+        if not is_seeder:
+            # Initialize empty file
+            with open(self.output_file, "wb") as f:
+                f.truncate(self.files[0]["length"])
 
     def piece_complete(self, piece_index, piece_data):
         if not self.have_pieces[piece_index]:

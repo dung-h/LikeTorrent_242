@@ -9,7 +9,10 @@ def main():
         print("Usage: python ui.py <torrent_file>")
         return
     torrent_file = sys.argv[1]
+    # client = TorrentClient(torrent_file)
     client = TorrentClient(torrent_file)
+    client.port = 6882  # Force a different port from the seeder
+    print(f"Client is running on {client.port}")
     print(f"Starting client with torrent: {torrent_file}")
     threading.Thread(target=client.start_upload).start()
     client.start_download()
