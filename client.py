@@ -9,6 +9,7 @@ from piece_manager import PieceManager
 from peer import Peer
 from config import TRACKER_PORT, PEER_PORT
 import os
+import requests
 
 class TorrentClient:
     def __init__(self, torrent_file):
@@ -45,19 +46,43 @@ class TorrentClient:
         self.upload_server.listen(5)
         self.running = True
 
+    # def contact_tracker(self):
+    #     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #     # sock.connect(('localhost', TRACKER_PORT))
+    #     sock.connect(('5b53c0d2b81983.lhr.life', TRACKER_PORT))
+    #     request = {
+    #         "torrent_hash": self.metainfo["torrent_hash"],
+    #         "peer_id": self.peer_id,
+    #         "port": self.port,  # Use the dynamically assigned port
+    #         "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"]
+    #     }
+    #     sock.send(json.dumps(request).encode())
+    #     response = json.loads(sock.recv(1024).decode())
+    #     self.peers = response["peers"]
+    #     sock.close()
+
+   
+
     def contact_tracker(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(('localhost', TRACKER_PORT))
-        request = {
-            "torrent_hash": self.metainfo["torrent_hash"],
-            "peer_id": self.peer_id,
-            "port": self.port,  # Use the dynamically assigned port
-            "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"]
-        }
-        sock.send(json.dumps(request).encode())
-        response = json.loads(sock.recv(1024).decode())
-        self.peers = response["peers"]
-        sock.close()
+        try:
+            tracker_url = self.metainfo["tracker"] + "/announce"
+            print(f"Connecting to tracker at {tracker_url}")
+            
+            request_data = {
+                "torrent_hash": self.metainfo["torrent_hash"],
+                "peer_id": self.peer_id,
+                "port": self.port,
+                "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"]
+            }
+            
+            response = requests.post(tracker_url, json=request_data, timeout=30)
+            if response.status_code == 200:
+                self.peers = response.json()["peers"]
+            else:
+                print(f"Error response from tracker: {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error connecting to tracker: {e}")
 
     def start_download(self):
         self.contact_tracker()
@@ -118,7 +143,7 @@ class TorrentClient:
                         for i in range(0, len(piece_data), chunk_size):
                             chunk = piece_data[i:i+chunk_size]
                             bytes_sent = conn.send(chunk)
-                            print(f"Sent {bytes_sent} bytes")
+                            print(f"Sent {bytes_sent} bytes to {addr}")
                             time.sleep(0.005)  # Small delay to avoid overwhelming the socket
                         
                         print(f"Finished sending piece {piece_index}, total {len(piece_data)} bytes")
@@ -128,7 +153,7 @@ class TorrentClient:
                 except Exception as e:
                     print(f"ERROR reading/sending file: {e}")
                     conn.send(b"ERROR")
-                
+            
             # Keep connection open briefly
             time.sleep(0.5)
             
