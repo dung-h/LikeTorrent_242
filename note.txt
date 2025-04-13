@@ -1,0 +1,6 @@
+python -m unittest test.test_tracker
+python -m unittest test.test_client
+python -m unittest test.test_upload
+python -m unittest test.test_download # Fail
+python -m unittest test.test_ui
+python -m unittest test.test_scrape

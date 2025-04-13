@@ -10,9 +10,15 @@ class Metainfo:
         self.filename = filename
         self.tracker_url = tracker_url
         self.files = [{"path": os.path.basename(filename), "length": self.get_file_size(filename)}]
+        total_length = 0
+        for fname in filename if isinstance(filename, list) else [filename]:
+            size = self.get_file_size(fname)
+            self.files.append({"path": os.path.basename(fname), "length": size, "start_offset": total_length})
+            total_length += size
         self.piece_length = PIECE_SIZE
         self.pieces = self.split_into_pieces()
         self.torrent_hash = self.generate_hash()
+        self.magnet_text = f"magnet:?xt=urn:btih:{self.torrent_hash}&tr={tracker_url}"
 
     def get_file_size(self, filename):
         with open(filename, "rb") as f:
