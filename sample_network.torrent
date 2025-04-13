@@ -1,1 +1,0 @@
-{"tracker": "http://192.168.1.148:8000", "files": [{"path": "sample.txt", "length": 30482}, {"path": "sample.txt", "length": 30482, "start_offset": 0}], "piece_length": 524288, "pieces": ["19175b6619fdc1c44c319dc86c25c418b806358b"], "torrent_hash": "8d3ad01d199b7d644ba3da2ae94dca7a879c9e2a"}

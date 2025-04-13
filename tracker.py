@@ -11,7 +11,6 @@ CORS(app)
 def init_db():
     conn = sqlite3.connect('torrent.db')
     c = conn.cursor()
-    # Replace with this:
     c.execute('''CREATE TABLE IF NOT EXISTS torrents (
         hash TEXT PRIMARY KEY,
         name TEXT,
@@ -24,7 +23,7 @@ def init_db():
         torrent_hash TEXT NOT NULL,
         path TEXT NOT NULL,
         length INTEGER NOT NULL,
-        start_offset INTEGER NOT NULL, -- For multi-file torrents
+        start_offset INTEGER NOT NULL,
         FOREIGN KEY (torrent_hash) REFERENCES torrents(hash)
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS peers (
@@ -34,8 +33,6 @@ def init_db():
         state TEXT,
         last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    
-    # Create peer_torrents table
     c.execute('''CREATE TABLE IF NOT EXISTS peer_torrents (
         peer_id TEXT,
         torrent_hash TEXT,
@@ -82,35 +79,51 @@ def announce():
         c.execute('''INSERT OR REPLACE INTO peers (peer_id, ip, port, state, last_seen)
                      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)''',
                   (peer_id, client_ip, port, 'active' if event != 'stopped' else 'stopped'))
+        conn.commit()  # Ensure peer is committed
 
         # Ensure torrent exists
         c.execute('SELECT total_pieces FROM torrents WHERE hash = ?', (torrent_hash,))
         torrent = c.fetchone()
         if not torrent:
-            # Assume default piece_length for new torrents; ideally provided by client
             c.execute('''INSERT INTO torrents (hash, name, piece_length, total_pieces)
                          VALUES (?, ?, ?, ?)''',
                       (torrent_hash, request.host_url, 512*1024, 1))  # Placeholder total_pieces
+            conn.commit()  # Commit torrent
 
         # Update peer_torrents
         c.execute('SELECT pieces_owned FROM peer_torrents WHERE peer_id = ? AND torrent_hash = ?',
                   (peer_id, torrent_hash))
         existing = c.fetchone()
         pieces_owned = existing[0] if existing else json.dumps([False] * (torrent[0] if torrent else 1))
-        state = {'started': 'downloading', 'completed': 'seeding', 'stopped': 'stopped'}.get(event, 'downloading')
+        
+        # Set state based on downloaded and event
+        state = 'downloading'  # Default
+        if event == 'completed' or (downloaded > 0 and torrent and downloaded >= torrent[0] * 512*1024):
+            state = 'seeding'
+        elif event == 'stopped':
+            state = 'stopped'
+
         c.execute('''INSERT OR REPLACE INTO peer_torrents (peer_id, torrent_hash, pieces_owned, downloaded_bytes, state)
                      VALUES (?, ?, ?, ?, ?)''',
                   (peer_id, torrent_hash, pieces_owned, downloaded, state))
+        conn.commit()  # Commit peer_torrents
+
+        # Debug: Log database state
+        c.execute('SELECT peer_id, ip, port, state FROM peers')
+        print("Peers table:", c.fetchall())
+        c.execute('SELECT peer_id, torrent_hash, state, downloaded_bytes FROM peer_torrents')
+        print("Peer_torrents table:", c.fetchall())
 
         # Get peers
         c.execute('''SELECT p.peer_id, p.ip, p.port FROM peers p
-             JOIN peer_torrents pt ON p.peer_id = pt.peer_id
-             WHERE pt.torrent_hash = ? AND p.state = 'active' AND p.peer_id != ?''',
-          (torrent_hash, peer_id))
+                     JOIN peer_torrents pt ON p.peer_id = pt.peer_id
+                     WHERE pt.torrent_hash = ? AND pt.state IN ('downloading', 'seeding') AND p.peer_id != ?''',
+                  (torrent_hash, peer_id))
         peers = [{"peer_id": row[0], "ip": row[1], "port": row[2]} for row in c.fetchall()]
 
         conn.commit()
         conn.close()
+        print(f"Returning peers to {peer_id}: {peers}")
         return jsonify({"peers": peers})
 
     except Exception as e:

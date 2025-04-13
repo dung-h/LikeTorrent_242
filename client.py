@@ -1,4 +1,5 @@
 # File: client.py
+import shutil
 import sqlite3
 import socket
 import json
@@ -11,14 +12,14 @@ from metainfo import Metainfo
 from piece_manager import PieceManager
 from peer import Peer
 from config import TRACKER_PORT, PEER_PORT
-
+import config
 class TorrentClient:
     def __init__(self, torrent_file, is_seeder=False):
         self.db = sqlite3.connect('torrent.db')
         self.init_db()
         self.metainfo = Metainfo.load(torrent_file)
         self.peer_id = hashlib.sha1(str(time.time()).encode()).hexdigest()[:20]
-        self.piece_manager = PieceManager(self.metainfo.to_dict(), is_seeder, self.db)
+        self.piece_manager = PieceManager(self.metainfo.to_dict(), is_seeder, self.db, client_peer_id=self.peer_id)
         self.peers = []
         self.state = 'seeding' if is_seeder else 'downloading'
         
@@ -32,7 +33,8 @@ class TorrentClient:
         self.upload_server.listen(5)
         self.running = True
         self.update_db_state()
-        
+
+
     def init_db(self):
         c = self.db.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS peers (
@@ -93,6 +95,8 @@ class TorrentClient:
     def contact_tracker(self, event="started"):
         try:
             tracker_url = f"{self.metainfo['tracker'].rstrip('/')}/announce"
+            if self.state == 'seeding':  # Override for seeders
+                event = 'completed'
             params = {
                 "torrent_hash": self.metainfo["torrent_hash"],
                 "peer_id": self.peer_id,
@@ -101,35 +105,70 @@ class TorrentClient:
                 "event": event,
                 "magnet": f"magnet:?xt=urn:btih:{self.metainfo['torrent_hash']}&tr={self.metainfo['tracker']}"
             }
+            print(f"Contacting tracker with params: {params}")
             response = requests.get(tracker_url, params=params, timeout=30)
             if response.status_code == 200:
                 self.peers = response.json()["peers"]
+                print(f"Received peers: {self.peers}")
                 self.state = {'started': 'downloading', 'completed': 'seeding', 'stopped': 'stopped'}.get(event, self.state)
                 self.update_db_state()
             if hasattr(self, 'test_mode') and self.test_mode:
-                # Hard-code connection to test seeder for tests
                 self.peers = [{"peer_id": "test_seeder", "ip": "localhost", "port": 6881}]
                 print(f"TEST MODE: Using test seeder at port 6881")
-            self.state = {'started': 'downloading', 'completed': 'seeding', 'stopped': 'stopped'}.get(event, self.state)
         except Exception as e:
             print(f"Tracker error: {e}")
-
+            
     def start_download(self):
         self.state = 'downloading'
         self.contact_tracker("started")
-        threads = []
+        
+        print(f"Starting download with {len(self.peers)} peers")
+        print(f"Piece status: {self.piece_manager.have_pieces}")
+        
+        missing_pieces = self.piece_manager.missing_pieces()
+        if not missing_pieces:
+            print("No missing pieces to download!")
+            if self.piece_manager.all_pieces_downloaded():
+                self.state = 'seeding'
+                self.contact_tracker("completed")
+            self.update_db_state()
+            return
+        
+        print(f"Need to download {len(missing_pieces)} pieces")
+        
+        max_retries = 3
         for peer_info in self.peers:
             if peer_info["peer_id"] == self.peer_id:
                 continue
             peer = Peer(peer_info["peer_id"], peer_info["ip"], peer_info["port"], self.piece_manager, self.db)
             if peer.connect():
                 for piece_index in self.piece_manager.missing_pieces():
-                    t = threading.Thread(target=peer.download_piece, args=(piece_index, self.peer_id))
-                    threads.append(t)
-                    t.start()
-                for t in threads:
-                    t.join()
+                    retries = 0
+                    success = False
+                    while retries < max_retries and not success:
+                        print(f"Downloading piece {piece_index} from {peer_info['peer_id']} (attempt {retries + 1}/{max_retries})")
+                        success = peer.download_piece(piece_index, self.peer_id)
+                        if not success:
+                            print(f"Failed to download piece {piece_index}")
+                            retries += 1
+                            peer.close()
+                            if retries < max_retries:
+                                peer = Peer(peer_info["peer_id"], peer_info["ip"], peer_info["port"], self.piece_manager, self.db)
+                                if not peer.connect():
+                                    print(f"Reconnection to {peer_info['peer_id']} failed")
+                                    break
+                    if not success:
+                        print(f"Giving up on piece {piece_index} after {max_retries} attempts")
+                    # Close and reconnect for next piece
+                    peer.close()
+                    if self.piece_manager.missing_pieces():
+                        peer = Peer(peer_info["peer_id"], peer_info["ip"], peer_info["port"], self.piece_manager, self.db)
+                        if not peer.connect():
+                            print(f"Reconnection to {peer_info['peer_id']} failed")
+                            break
+                
                 peer.close()
+        
         if self.piece_manager.all_pieces_downloaded():
             self.state = 'seeding'
             self.contact_tracker("completed")
@@ -138,12 +177,12 @@ class TorrentClient:
     def handle_upload(self, conn, addr):
         try:
             conn.settimeout(10)
-            print(f"New connection from {addr}")
+            print(f"New upload connection from {addr}")
             data = conn.recv(1024).decode().strip()
             print(f"Seeder received: {data}")
             
             if "ESTABLISH" in data:
-                print(f"Sending ESTABLISHED to {addr}")
+                print(f"Sending ESTABLISHED response")
                 conn.send("ESTABLISHED".encode())
                 
                 data = conn.recv(1024).decode().strip()
@@ -156,31 +195,52 @@ class TorrentClient:
                     
                     if os.path.exists(file_path):
                         print(f"Sending piece {piece_index}")
+                        expected_size = self.piece_manager.expected_piece_length(piece_index)
                         with open(file_path, "rb") as f:
                             f.seek(piece_index * self.metainfo["piece_length"])
-                            piece_data = f.read(self.metainfo["piece_length"])
-                            print(f"Sending {len(piece_data)} bytes")
+                            piece_data = f.read(expected_size)
+                            print(f"Read {len(piece_data)} bytes from file")
                             
-                            # Send data in smaller chunks
-                            chunk_size = 4096
+                            import hashlib
+                            piece_hash = hashlib.sha1(piece_data).hexdigest()
+                            expected_hash = self.metainfo["pieces"][piece_index]
+                            print(f"Seeder calculated hash: {piece_hash}")
+                            print(f"Expected hash: {expected_hash}")
+                            print(f"Hash match: {piece_hash == expected_hash}")
+                            
                             total_sent = 0
+                            chunk_size = 4096
                             for i in range(0, len(piece_data), chunk_size):
                                 chunk = piece_data[i:i+chunk_size]
                                 bytes_sent = conn.send(chunk)
                                 total_sent += bytes_sent
-                                print(f"Sent chunk: {bytes_sent} bytes")
+                                print(f"Sent chunk of {bytes_sent} bytes, total: {total_sent}/{len(piece_data)}")
                             
-                            print(f"Total bytes sent: {total_sent}")
+                            time.sleep(0.1)
         except Exception as e:
             print(f"Upload error: {e}")
         finally:
+            time.sleep(0.1)
             conn.close()
 
-
-
     def start_upload(self):
+        for file_info in self.metainfo["files"]:
+            path = os.path.join(self.piece_manager.download_dir, file_info["path"])
+            if os.path.exists(path):
+                print(f"File found: {path} ({os.path.getsize(path)} bytes)")
+            else:
+                print(f"WARNING: File not found: {path}")
+                
+                # Copy from original location if needed
+                original_path = file_info["path"]
+                if os.path.exists(original_path):
+                    print(f"Found original file at {original_path}, copying...")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    shutil.copy(original_path, path)
+                    print(f"Copied file to {path}")
         self.state = 'seeding' if self.piece_manager.all_pieces_downloaded() else 'downloading'
         self.update_db_state()
+        self.contact_tracker("started")
         try:
             while self.running:
                 conn, addr = self.upload_server.accept()
@@ -209,20 +269,24 @@ class TorrentClient:
             threading.Thread(target=self.start_upload).start()
             self.start_download()
             self.update_db_state()
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description='BitTorrent-like client')
+    parser.add_argument('torrent_file', help='Path to the torrent file')
+    parser.add_argument('--seed', action='store_true', help='Run in seeder mode')
+    parser.add_argument('--port', type=int, default=config.PEER_PORT, 
+                        help='Port to listen on')
+    
+    args = parser.parse_args()
+    
+    client = TorrentClient(args.torrent_file, is_seeder=args.seed)
+    client.port = args.port  # Override the default port
+    
+    if args.seed:
+        client.start_upload()
+    else:
+        client.start_download()
 
 if __name__ == "__main__":
-       import sys
-       torrent_file = sys.argv[1] if len(sys.argv) > 1 else None
-       is_seeder = "--seed" in sys.argv
-       if not torrent_file:
-           print("Usage: python client.py <torrent_file> [--seed]")
-           sys.exit(1)
-       client = TorrentClient(torrent_file, is_seeder=is_seeder)
-       threading.Thread(target=client.start_upload, daemon=True).start()
-       if not is_seeder:
-           client.start_download()
-       try:
-           while client.running:
-               time.sleep(1)
-       except KeyboardInterrupt:
-           client.stop()
+    main()
