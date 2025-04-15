@@ -1,143 +1,110 @@
+# File: metainfo.py
 import hashlib
-import json
-import sys
+import logging
 import os
-from config import PIECE_SIZE
+import sys
+import bencodepy
 
-class Metainfo:
-    def __init__(self, filename, tracker_url):
-        self.filename = filename
-        self.tracker_url = tracker_url
-        if isinstance(filename, list):
-            meta = Metainfo.create_torrent_for_files(filename, piece_length=PIECE_SIZE)
-            self.files = meta["files"]
-            self.piece_length = meta["piece_length"]
-            self.pieces = [p for p in meta["pieces"]]
-            self.torrent_hash = meta["torrent_hash"]
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def parse_torrent(torrent_file):
+    """Parse .torrent file into a metainfo dictionary."""
+    if not os.path.exists(torrent_file):
+        raise FileNotFoundError(f"Torrent file {torrent_file} not found")
+
+    metainfo = {}
+    try:
+        with open(torrent_file, 'rb') as f:
+            data = bencodepy.decode(f.read())
+
+        # Populate metainfo
+        metainfo['announce'] = data[b'announce'].decode()
+        info = data[b'info']
+        metainfo['torrent_hash'] = hashlib.sha1(bencodepy.encode(info)).hexdigest()
+        metainfo['magnet'] = f"magnet:?xt=urn:btih:{metainfo['torrent_hash']}&tr={metainfo['announce']}"
+        metainfo['piece_length'] = info[b'piece length']
+        
+        # Handle files (single or multi-file)
+        if b'files' in info:
+            metainfo['files'] = [
+                {'path': '/'.join(p.decode() for p in file[b'path']), 'length': file[b'length']}
+                for file in info[b'files']
+            ]
         else:
-            file_size = self.get_file_size(filename)
-            self.files = [{
-                "path": os.path.basename(filename),
-                "length": file_size,
-                "start_offset": 0
-            }]
-            # Fix: use file_size if it's smaller than PIECE_SIZE
-            if file_size < PIECE_SIZE:
-                self.piece_length = file_size
-            else:
-                self.piece_length = PIECE_SIZE
-            self.pieces = self.split_into_pieces()
-            self.torrent_hash = self.generate_hash()
-        self.magnet_text = f"magnet:?xt=urn:btih:{self.torrent_hash}&tr={tracker_url}"
-    @staticmethod
-    def create_torrent_for_files(file_paths, piece_length=PIECE_SIZE, name="MultiFileTorrent"):
-        """Create a torrent for multiple files with proper offset tracking."""
-        files_list = []
-        pieces = b""
-        file_start_offset = 0  # Track the absolute offset of each file
+            metainfo['files'] = [{'path': info[b'name'].decode(), 'length': info[b'length']}]
 
-        for filepath in file_paths:
-            file_size = os.path.getsize(filepath)
-            rel_path = os.path.basename(filepath)  # Use relative path if needed
-
-            # Add file with its starting offset
-            files_list.append({
-                "path": rel_path,
-                "length": file_size,
-                "start_offset": file_start_offset
-            })
-            file_start_offset += file_size
-
-            # Generate pieces as before
-            with open(filepath, "rb") as f:
-                while True:
-                    chunk = f.read(piece_length)
-                    if not chunk:
-                        break
-                    pieces += hashlib.sha1(chunk).digest()
-
-        metainfo = {
-            "name": name,
-            "piece_length": piece_length,
-            "pieces": [pieces[i:i+20].hex() for i in range(0, len(pieces), 20)],  # assuming SHA-1 (20 bytes)
-            "files": files_list,
-            "torrent_hash": hashlib.sha1(pieces).hexdigest()
-        }
+        # Convert pieces to list of SHA1 hashes
+        pieces_raw = info[b'pieces']
+        if len(pieces_raw) % 20 != 0:
+            raise ValueError("Invalid pieces length")
+        metainfo['pieces'] = [pieces_raw[i:i+20].hex() for i in range(0, len(pieces_raw), 20)]
+        
+        logging.info(f"Parsed torrent: {metainfo['files'][0]['path']}, {sum(f['length'] for f in metainfo['files'])} bytes, {len(metainfo['pieces'])} pieces")
         return metainfo
+    except Exception as e:
+        logging.error(f"Failed to parse torrent: {e}")
+        raise
 
-    def get_file_size(self, filename):
-        with open(filename, "rb") as f:
-            return os.path.getsize(filename)
+def create_torrent(input_file, tracker_url, output_torrent, piece_size=512*1024):
+    """Create a .torrent file for the given input file."""
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"Input file {input_file} not found")
 
-    def split_into_pieces(self):
-        pieces = []
-        with open(self.filename, "rb") as f:
-            while True:
-                piece = f.read(PIECE_SIZE)
-                if not piece:
-                    break
-                pieces.append(hashlib.sha1(piece).hexdigest())
-        return pieces
+    info = {}
+    
+    # File details
+    file_size = os.path.getsize(input_file)
+    file_name = os.path.basename(input_file)
+    info[b'name'] = file_name.encode()
+    info[b'length'] = file_size
+    info[b'piece length'] = piece_size
 
-    def __getitem__(self, key):
-        # Allows dictionary-style access: metainfo["pieces"]
-        if key == "tracker":
-            return self.tracker_url
-        return getattr(self, key)
+    # Compute piece hashes
+    pieces = []
+    with open(input_file, 'rb') as f:
+        while True:
+            piece = f.read(piece_size)
+            if not piece:
+                break
+            pieces.append(hashlib.sha1(piece).digest())
+    if not pieces:
+        raise ValueError("File is empty or too small")
+    info[b'pieces'] = b''.join(pieces)
 
-    @staticmethod
-    def load(torrent_file):
-        with open(torrent_file, "r") as f:
-            meta_dict = json.load(f)
-        meta = Metainfo.__new__(Metainfo)
-        meta.tracker_url = meta_dict["tracker"]
-        meta.files = meta_dict["files"]
-        meta.piece_length = meta_dict["piece_length"]
-        meta.pieces = meta_dict["pieces"]
-        meta.torrent_hash = meta_dict["torrent_hash"]
-        meta.filename = meta_dict["files"][0]["path"]
-        return meta
+    # Construct torrent dictionary
+    torrent = {
+        b'announce': tracker_url.encode(),
+        b'info': info
+    }
 
-    def generate_hash(self):
-        data = {"tracker": self.tracker_url, "files": self.files, "piece_length": self.piece_length}
-        return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    # Write to output file
+    try:
+        with open(output_torrent, 'wb') as f:
+            f.write(bencodepy.encode(torrent))
+        logging.info(f"Created torrent: {output_torrent} for {file_name}, {file_size} bytes, {len(pieces)} pieces")
+    except Exception as e:
+        logging.error(f"Failed to create torrent: {e}")
+        raise
 
-    def to_dict(self):
-        return {
-            "tracker": self.tracker_url,
-            "files": self.files,
-            "piece_length": self.piece_length,
-            "pieces": self.pieces,
-            "torrent_hash": self.torrent_hash
-        }
-
-    def save(self, torrent_file):
-        with open(torrent_file, "w") as f:
-            json.dump(self.to_dict(), f)
-        print(f"Torrent file saved as {torrent_file}")
-
-def main():
-    if len(sys.argv) != 4:
-        print("Usage: python metainfo.py <input_file or files comma-separated> <tracker_url> <output_torrent_file>")
-        sys.exit(1)
-
-    input_param = sys.argv[1]
-    tracker_url = sys.argv[2]
-    output_file = sys.argv[3]
-
-    # If multiple files are provided separated by commas, use create_torrent_for_files
-    if "," in input_param:
-        file_paths = input_param.split(",")
-        meta_dict = Metainfo.create_torrent_for_files(file_paths)
-        with open(output_file, "w") as f:
-            json.dump(meta_dict, f)
-        print(f"Multi-file torrent saved as {output_file}")
-    else:
-        if not os.path.exists(input_param):
-            print(f"Error: File '{input_param}' does not exist.")
+if __name__ == '__main__':
+    if len(sys.argv) == 4:
+        # Create a torrent file
+        input_file, tracker_url, output_torrent = sys.argv[1:4]
+        try:
+            create_torrent(input_file, tracker_url, output_torrent)
+        except Exception as e:
+            logging.error(f"Error creating torrent: {e}")
             sys.exit(1)
-        meta = Metainfo(input_param, tracker_url)
-        meta.save(output_file)
-
-if __name__ == "__main__":
-    main()
+    elif len(sys.argv) == 2:
+        # Parse a torrent file
+        torrent_file = sys.argv[1]
+        try:
+            parse_torrent(torrent_file)
+        except Exception as e:
+            logging.error(f"Error parsing torrent: {e}")
+            sys.exit(1)
+    else:
+        print("Usage:")
+        print("  To create: python metainfo.py <input_file> <tracker_url> <output_torrent>")
+        print("  To parse: python metainfo.py <torrent_file>")
+        sys.exit(1)

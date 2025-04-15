@@ -1,200 +1,191 @@
-import os
+# File: piece_manager.py
+import hashlib
 import json
+import math
+import os
 import sqlite3
-from config import PIECE_SIZE, DOWNLOAD_DIR
+import threading
+from config import DOWNLOAD_DIR, PIECE_SIZE
 
 class PieceManager:
-    def __init__(self, metainfo, is_seeder=False, db=None, client_peer_id=None):
-        self.db = db
+    def __init__(self, metainfo, peer_id):
         self.metainfo = metainfo
-        self.total_pieces = len(metainfo["pieces"])
-        self.download_dir = metainfo.get("download_dir", DOWNLOAD_DIR)
-        os.makedirs(self.download_dir, exist_ok=True)
+        self.download_dir = DOWNLOAD_DIR
+        self.peer_id = peer_id
         self.files = metainfo["files"]
-        self.client_peer_id = client_peer_id
-        
-        # Initialize piece ownership
-        if is_seeder:
-            self.have_pieces = [True] * self.total_pieces
-        else:
-            # For leechers, check if we actually have the complete file
-            all_files_complete = True
-            for file_info in self.files:
-                path = os.path.join(self.download_dir, file_info["path"])
-                if not os.path.exists(path) or os.path.getsize(path) != file_info["length"]:
-                    all_files_complete = False
-                    break
-                    
-            if all_files_complete:
-                # Verify the file content against the piece hashes
-                print("Files found, checking if content matches expected hashes...")
-                self.have_pieces = [self.verify_existing_piece(i) for i in range(self.total_pieces)]
-            else:
-                self.have_pieces = [False] * self.total_pieces
-                
-            print(f"Initialized with {sum(self.have_pieces)}/{self.total_pieces} pieces")
-    
-        # For leechers, initialize the destination files with correct sizes.
-        if not is_seeder:
-            for file_info in self.files:
-                path = os.path.join(self.download_dir, file_info["path"])
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                # Only create/truncate the file if it doesn't exist or has wrong size
-                if not os.path.exists(path) or os.path.getsize(path) != file_info["length"]:
-                    with open(path, "wb") as f:
-                        f.truncate(file_info["length"])
-                    
+        self.total_pieces = len(metainfo["pieces"])
+        self.piece_length = metainfo["piece_length"]
+        self.file_lock = threading.Lock()
+        self.init_db()
+        self.have_pieces = self.load_pieces()
+        # Initialize files with correct sizes
+        for file_info in self.files:
+            file_path = os.path.join(self.download_dir, file_info["path"])
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            if not os.path.exists(file_path) or os.path.getsize(file_path) != file_info["length"]:
+                with open(file_path, "wb") as f:
+                    f.truncate(file_info["length"])
+                print(f"Initialized file {file_path} to {file_info['length']} bytes")
 
-    def verify_existing_piece(self, piece_index):
-        """Check if an existing piece on disk matches the expected hash."""
-        try:
-            expected_len = self.expected_piece_length(piece_index)
-            piece_offset = piece_index * self.metainfo["piece_length"]
-            piece_data = b''
-            
-            # Read the piece data from disk
-            for file_info in self.files:
-                file_path = os.path.join(self.download_dir, file_info["path"])
-                file_start = file_info.get("start_offset", 0)
-                file_end = file_start + file_info["length"]
-                
-                if file_end <= piece_offset:
-                    continue
-                    
-                if file_start >= piece_offset + expected_len:
-                    break
-                    
-                # Calculate overlap
-                overlap_start = max(piece_offset, file_start)
-                overlap_end = min(piece_offset + expected_len, file_end)
-                overlap_length = overlap_end - overlap_start
-                
-                if overlap_length <= 0:
-                    continue
-                    
-                # Calculate file offset
-                file_offset = overlap_start - file_start
-                
-                # Calculate piece data offset
-                piece_data_offset = overlap_start - piece_offset
-                
-                # Read the relevant part of the file
-                with open(file_path, "rb") as f:
-                    f.seek(file_offset)
-                    data = f.read(overlap_length)
-                    
-                    # Add the data at the correct offset in the piece buffer
-                    if len(piece_data) < piece_data_offset + len(data):
-                        piece_data = piece_data.ljust(piece_data_offset, b'\0')
-                        piece_data = piece_data[:piece_data_offset] + data
-            
-            # Verify against expected hash
-            import hashlib
-            piece_hash = hashlib.sha1(piece_data).hexdigest()
-            expected_hash = self.metainfo["pieces"][piece_index]
-            
-            return piece_hash == expected_hash
-        except Exception as e:
-            print(f"Error verifying existing piece {piece_index}: {e}")
-            return False
-        
+    def get_db_connection(self):
+        """Create a new database connection."""
+        return sqlite3.connect('torrent.db', timeout=10)
+
+    def init_db(self):
+        """Initialize required database tables."""
+        conn = self.get_db_connection()
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS peer_torrents (
+                        peer_id TEXT,
+                        torrent_hash TEXT,
+                        pieces_owned TEXT,
+                        downloaded_bytes INTEGER,
+                        state TEXT,
+                        PRIMARY KEY (peer_id, torrent_hash)
+                     )''')
+        conn.commit()
+        conn.close()
+        print("Initialized peer_torrents table")
+
+    def load_pieces(self):
+        """Load piece status from database or verify file contents."""
+        conn = self.get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT pieces_owned FROM peer_torrents WHERE peer_id = ? AND torrent_hash = ?',
+                  (self.peer_id, self.metainfo["torrent_hash"]))
+        result = c.fetchone()
+        pieces = [False] * self.total_pieces
+
+        # Try loading from database
+        if result:
+            try:
+                pieces = json.loads(result[0])
+                if len(pieces) != self.total_pieces:
+                    print(f"Piece count mismatch: expected {self.total_pieces}, got {len(pieces)}")
+                    pieces = [False] * self.total_pieces
+            except json.JSONDecodeError:
+                print("Invalid pieces_owned JSON, resetting pieces")
+                pieces = [False] * self.total_pieces
+
+        # Verify file existence and sizes
+        all_files_exist = True
+        for file_info in self.files:
+            path = os.path.join(self.download_dir, file_info["path"])
+            if not os.path.exists(path) or os.path.getsize(path) != file_info["length"]:
+                print(f"File missing or incorrect size: {path}")
+                all_files_exist = False
+                break
+
+        # If files exist, validate pieces by hashing
+        if all_files_exist:
+            verified_pieces = [False] * self.total_pieces
+            for piece_index in range(self.total_pieces):
+                piece_data = bytearray()
+                offset = piece_index * self.piece_length
+                bytes_read = 0
+                expected_length = self.expected_piece_length(piece_index)
+
+                for file_info in self.files:
+                    file_path = os.path.join(self.download_dir, file_info["path"])
+                    file_offset = max(0, offset - bytes_read)
+                    bytes_to_read = min(file_info["length"] - file_offset, expected_length - len(piece_data))
+
+                    if bytes_to_read <= 0:
+                        continue
+
+                    with open(file_path, "rb") as f:
+                        f.seek(file_offset)
+                        data = f.read(bytes_to_read)
+                        piece_data.extend(data)
+                        bytes_read += len(data)
+
+                piece_hash = hashlib.sha1(piece_data).hexdigest()
+                expected_hash = self.metainfo["pieces"][piece_index]
+                if piece_hash == expected_hash:
+                    verified_pieces[piece_index] = True
+                else:
+                    print(f"Piece {piece_index} hash mismatch: got {piece_hash}, expected {expected_hash}")
+
+            # Use verified pieces if database is incomplete
+            if any(verified_pieces):
+                pieces = verified_pieces
+                print(f"Loaded {pieces.count(True)} pieces from file verification")
+            elif pieces.count(True) > verified_pieces.count(True):
+                print("Using database pieces as they indicate more progress")
+            else:
+                pieces = verified_pieces
+
+        # Update database with current state
+        c.execute('''INSERT OR REPLACE INTO peer_torrents (peer_id, torrent_hash, pieces_owned, downloaded_bytes, state)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (self.peer_id, self.metainfo["torrent_hash"], json.dumps(pieces),
+                   sum(pieces) * self.piece_length, 'downloading'))
+        conn.commit()
+        conn.close()
+        print(f"Loaded pieces: {pieces.count(True)}/{self.total_pieces} marked as complete")
+        return pieces
+
     def expected_piece_length(self, piece_index):
-        """Return the expected length for this piece.
-        For the last piece (or only piece in a small file) the length may be smaller."""
+        """Calculate the expected length of a piece."""
         total_file_length = sum(file_info["length"] for file_info in self.files)
         piece_length = self.metainfo["piece_length"]
         if (piece_index + 1) * piece_length > total_file_length:
             return total_file_length - piece_index * piece_length
         return piece_length
 
-    def write_piece(self, piece_index, piece_data):
-        """Write a piece to the appropriate file(s) using proper offset calculation."""
-        piece_offset = piece_index * self.metainfo["piece_length"]
-        expected_len = self.expected_piece_length(piece_index)
-        piece_remaining = expected_len
-        piece_cursor = 0
-        
-        # Process each file that might contain part of this piece
-        for file_info in self.files:
-            file_path = os.path.join(self.download_dir, file_info["path"])
-            file_start = file_info.get("start_offset", 0)
-            file_end = file_start + file_info["length"]
-            
-            # Skip files that are completely before this piece
-            if file_end <= piece_offset:
-                continue
-            
-            # If this file is completely after the piece, break out
-            if file_start >= piece_offset + piece_remaining:
-                break
-                
-            # Calculate overlap between the piece and the file
-            overlap_start = max(piece_offset, file_start)
-            overlap_end = min(piece_offset + piece_remaining, file_end)
-            overlap_length = overlap_end - overlap_start
-            
-            if overlap_length <= 0:
-                continue
-                
-            # Calculate where to write in the file
-            file_offset = overlap_start - file_start
-            
-            # Calculate which part of piece_data to write
-            piece_data_offset = overlap_start - piece_offset
-            
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            # Create file with correct size if it doesn't exist
-            if not os.path.exists(file_path):
-                with open(file_path, 'wb') as f:
-                    f.truncate(file_info["length"])
-            
-            # Write the data
-            with open(file_path, "r+b") as f:
-                f.seek(file_offset)
-                f.write(piece_data[piece_data_offset: piece_data_offset + overlap_length])
-            
-            piece_cursor += overlap_length
-            if piece_cursor >= piece_remaining:
-                break
-
-    def verify_piece(self, piece_index, piece_data):
-        """Verify a piece's hash matches the expected hash."""
-        import hashlib
-        
-        # Calculate hash of received data
-        calculated_hash = hashlib.sha1(piece_data).hexdigest()
-        
-        # Get expected hash from metainfo (ensure comparison of same formats)
+    def piece_complete(self, piece_index, data):
+        """Write a piece to disk and mark it complete if valid."""
+        piece_hash = hashlib.sha1(data).hexdigest()
         expected_hash = self.metainfo["pieces"][piece_index]
-        
-        # Debug to see what's happening
-        print(f"Expected hash: {expected_hash}")
-        print(f"Calculated hash: {calculated_hash}")
-        
-        return calculated_hash == expected_hash
-    def piece_complete(self, piece_index, piece_data):
-        """Verify and write a completed piece."""
-        if self.verify_piece(piece_index, piece_data):
-            if not self.have_pieces[piece_index]:
-                self.have_pieces[piece_index] = True
-                expected_len = self.expected_piece_length(piece_index)
-                trimmed_piece = piece_data[:expected_len]
-                self.write_piece(piece_index, trimmed_piece)
-                c = self.db.cursor()
-                c.execute('UPDATE peer_torrents SET pieces_owned = ?, downloaded_bytes = ? WHERE torrent_hash = ?',
-                          (json.dumps(self.have_pieces),
-                           sum(self.have_pieces) * self.metainfo["piece_length"],
-                           self.metainfo["torrent_hash"]))
-                self.db.commit()
-            return True
-        else:
-            print(f"Piece {piece_index} failed verification! Discarding.")
+        print(f"Piece {piece_index}: Hash {piece_hash}, Expected {expected_hash}")
+        if piece_hash != expected_hash:
+            print(f"Piece {piece_index} hash mismatch")
             return False
 
-    def all_pieces_downloaded(self):
-        return all(self.have_pieces)
+        expected_length = self.expected_piece_length(piece_index)
+        if len(data) != expected_length:
+            print(f"Piece {piece_index} length mismatch: got {len(data)}, expected {expected_length}")
+            return False
+
+        with self.file_lock:
+            offset = piece_index * self.piece_length
+            bytes_written = 0
+            for file_info in self.files:
+                file_path = os.path.join(self.download_dir, file_info["path"])
+                file_offset = max(0, offset - bytes_written)
+                bytes_to_write = min(file_info["length"] - file_offset, len(data) - bytes_written)
+
+                if bytes_to_write <= 0:
+                    continue
+
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "r+b" if os.path.exists(file_path) else "wb") as f:
+                    f.seek(file_offset)
+                    f.write(data[bytes_written:bytes_written + bytes_to_write])
+                    f.truncate(file_info["length"])
+
+                bytes_written += bytes_to_write
+
+            if bytes_written != len(data):
+                print(f"Piece {piece_index} write error: wrote {bytes_written}, expected {len(data)}")
+                return False
+
+        self.have_pieces[piece_index] = True
+        conn = self.get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT OR REPLACE INTO peer_torrents (peer_id, torrent_hash, pieces_owned, downloaded_bytes, state)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (self.peer_id, self.metainfo["torrent_hash"], json.dumps(self.have_pieces),
+                   sum(self.have_pieces) * self.piece_length, 'downloading'))
+        conn.commit()
+        conn.close()
+        print(f"Piece {piece_index} written and marked complete")
+        return True
 
     def missing_pieces(self):
-        """Return indices of pieces that still need to be downloaded."""
-        print(f"Checking missing pieces. Current status: {self.have_pieces}")
-        return [i for i, has_piece in enumerate(self.have_pieces) if not has_piece]
+        """Return indices of missing pieces."""
+        return [i for i, have in enumerate(self.have_pieces) if not have]
+
+    def all_pieces_downloaded(self):
+        """Check if all pieces are downloaded."""
+        return all(self.have_pieces)

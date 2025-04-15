@@ -1,1 +1,0 @@
-{"tracker": "http://localhost:8000", "files": [{"path": "sequential_data_6chunks.txt", "length": 6144, "start_offset": 0}], "piece_length": 6144, "pieces": ["02a724712da4f803eb98bdc154cd52aabb6174fe"], "torrent_hash": "38456ed4d2cd714d3e2dce2b71718f8cb4e19d7a"}
