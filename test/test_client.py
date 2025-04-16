@@ -1,8 +1,8 @@
 import unittest
 import os
 import sqlite3
-from metainfo import Metainfo
-from client import TorrentClient
+from src.peer.metainfo import Metainfo
+from src.peer.client import TorrentClient
 import hashlib
 import json
 import threading

@@ -3,8 +3,8 @@ import threading
 import time
 import os
 import socket
-from client import TorrentClient
-from metainfo import Metainfo
+from src.peer.client import TorrentClient
+from src.peer.metainfo import Metainfo
 import sqlite3
 
 class TestUpload(unittest.TestCase):

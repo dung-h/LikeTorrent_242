@@ -3,8 +3,8 @@ import threading
 import time
 import os
 import types  # Add this import at the top level
-from client import TorrentClient
-from metainfo import Metainfo
+from src.peer.client import TorrentClient
+from src.peer.metainfo import Metainfo
 import sqlite3
 import socket
 

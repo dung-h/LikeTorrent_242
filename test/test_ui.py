@@ -1,8 +1,8 @@
 import unittest
 import tkinter as tk
-from ui import TorrentGUI
+from src.ui import TorrentGUI
 import os
-from metainfo import Metainfo
+from src.peer.metainfo import Metainfo
 import sqlite3
 
 class TestUI(unittest.TestCase):

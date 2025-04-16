@@ -3,7 +3,7 @@ import threading
 import time
 import requests
 import sqlite3
-from tracker import app, init_db
+from src.tracker.tracker import app, init_db
 
 class TestTracker(unittest.TestCase):
     @classmethod

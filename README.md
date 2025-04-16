@@ -1,85 +1,172 @@
-# Simple Like-Torrent Application
+# LikeTorrent Application
 
-This is a BitTorrent-like file-sharing application developed for the "Computer Networks" course (Semester 1, 2023-2024). It implements a peer-to-peer file-sharing system with a centralized HTTP tracker, a Tkinter-based GUI, SQLite database persistence, and support for multi-file torrents. Clients automatically download files from peers and seed (upload) to others after completion, adhering to the assignment's requirements.
+This is a BitTorrent-like file-sharing application developed for the "Computer Networks" course (Semester 2, 2024-2025). It implements a peer-to-peer file-sharing system with a Flask-based HTTP tracker, a Tkinter-based GUI, and support for multi-file torrents. The application prioritizes a user-friendly GUI (`ui.py`) for managing torrents, with optional command-line support (`client.py`). Clients can download files, create torrents, and seed, meeting the assignment's requirements for UI (5%), downloading (30%), uploading (15%), and multi-file support.
 
 ## Features
-- **Tracker Protocol**: HTTP-based tracker to register peers, manage torrent metadata, and provide peer lists.
-- **Torrent Download/Upload**: Concurrent downloading of multi-file torrents from multiple peers; automatic seeding after download completion.
-- **GUI**: Tkinter interface to select torrent files, set download directories, pause/stop/resume downloads, and view detailed statistics (peers, files, states).
-- **Database Persistence**: SQLite stores torrent metadata, peer states (downloading, paused, stopped, seeding), piece ownership, and peer interactions for resuming across sessions.
-- **Magnet Text**: Generates magnet links for torrents, included in tracker requests.
-- **Extra Credit**: Tracker scrape endpoint to retrieve torrent statistics (complete, incomplete peers).
-- **Multi-File Support**: Handles torrents with multiple files, mapping pieces to file offsets correctly.
+
+* **Tracker Protocol:** Flask-based HTTP tracker (`/announce`, `/scrape`) manages peer registration and torrent tracking. Supports magnet links and `started`, `stopped`, `completed` events.
+* **Torrent Download/Upload:**
+    * Concurrent downloading from multiple peers with piece-to-file mapping for multi-file torrents.
+    * Seeding after download or from user-selected directories.
+    * Piece verification via SHA-1 hashes.
+* **GUI (`ui.py`):**
+    * Add, create, and manage torrents in a queue.
+    * Control downloads/seeding (start, pause, resume, stop).
+    * Tabs for:
+        * **Overview:** Progress (%), state, speed graph (download/upload).
+        * **Peers:** IP, port, pieces downloaded/uploaded, speeds.
+        * **Files:** File names, sizes, types, progress, and actions (open file/folder).
+    * Context menus to kick peers or open files/folders.
+    * Dark/light theme toggle.
+* **Command-Line Support:** Optional `client.py` for downloading/seeding with specified paths.
+* **Multi-File Support:** Correctly handles torrents with multiple files (e.g., two videos).
+* **Extra Credit:**
+    * Tracker `/scrape` endpoint for statistics (complete/incomplete peers).
+    * Simultaneous torrent management via GUI.
+    * **Dynamic Peer Discovery:** Periodically queries tracker for new peers during downloads.
+    * **Peer Selection:** Weighted peer selection based on success rate and download time, with basic rarest-first strategy.
+
+## Known Issues and Fixes
+
+* **Single Seeder Dominance:** Fixed by implementing a bitfield exchange to verify piece availability and prioritizing rarest pieces.
+* **Incorrect Peer Count:** Resolved by cleaning up stale `peer_stats` entries and counting only active peers.
+* **Speed Display Errors:** Improved by buffering bytes and using a moving average for smoother speed calculations.
+* **Peer Discovery:** Enhanced with more frequent tracker queries (every 15s) and dynamic peer integration.
 
 ## Requirements
-- **Python**: 3.8 or higher.
-- **Libraries**:
-  - `flask`: For the tracker server.
-  - `flask-cors`: For cross-origin requests.
-  - `requests`: For HTTP communication.
-  - `tkinter`: For the GUI (included with Python; may need installation on Linux, e.g., `sudo apt-get install python3-tk`).
-- Install dependencies:
-  ```bash
-  pip install flask flask-cors requests
 
-## Project structure
+* **Python:** 3.8 or higher.
+* **Libraries:**
+    * `bencodepy`
+    * `flask`
+    * `flask-cors`
+    * `requests`
+    * `matplotlib`
+    * `Pillow` (optional for icons)
+    * `tkinter` (install on Linux: `sudo apt-get install python3-tk`)
+* **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Project Structure
 ```plaintext
-simple-like-torrent/
-├── client.py         # Client logic for downloading and seeding
-├── config.py         # Configuration (ports, piece size)
-├── metainfo.py       # Torrent file creation and loading
-├── peer.py           # Peer connection handling
-├── piece_manager.py  # Piece and file management
-├── tracker.py        # HTTP tracker server
-├── ui.py             # Tkinter GUI
-├── tests/            # Unit tests
-│   ├── __init__.py
+LikeTorrent/
+├── src/
+│   ├── peer/
+│   │   ├── client.py          # Client logic for downloading/seeding
+│   │   ├── config.py          # Configuration (ports, piece size)
+│   │   ├── metainfo.py        # Torrent file parsing
+│   │   ├── peer.py            # Peer connection handling
+│   │   ├── piece_manager.py   # Piece and file management
+│   │   └── torrent_maker.py   # Torrent file creation
+│   ├── tracker/
+│   │   └── tracker.py         # Flask-based HTTP tracker
+│   ├── ui.py                  # Tkinter client GUI
+│   └── tracker_ui.py          # Tkinter tracker GUI
+├── tests/
 │   ├── test_tracker.py
 │   ├── test_client.py
 │   ├── test_download.py
 │   ├── test_upload.py
-│   ├── test_ui.py
-│   └── test_scrape.py
-├── downloads/        # Default download directory (created automatically)
-├── torrent.db        # SQLite database (created on first run)
-├── requirements.txt  # Python dependencies
-└── README.md         # This file
+│   └── test_ui.py
+├── requirements.txt
+└── README.md
 ```
 ## Setup
-### Clone the repository 
-```python
-git clone <repository-url>
-cd simple-like-torrent
-```
-### Create a Virtual Environment
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate     # Windows
-```
-### Install dependencies
-```bash
-pip install -r requirements.txt
-```
-### Create a torrent file
-* For a single file:
-```bash
-python metainfo.py sample1.txt http://localhost:8000 sample.torrent
-```
-* For multiple files:
-```bash
-python metainfo.py "sample1.txt sample2.txt" http://localhost:8000 multi.torrent
-```
-## Running the application
-### Start the tracker
-```bash
-python tracker.py
-```
-### Run a client
-```bash
-python ui.py
-```
-### Testing seeding (Optional)
-```bash
-python client.py sample.torrent --seed
-```
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd LikeTorrent
+    ```
+2.  **Create and activate a virtual environment:**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate   # Linux/Mac
+    venv\Scripts\activate      # Windows
+    ```
+3.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Running the Application
+
+### Start the Tracker
+
+1.  Navigate to `src`:
+    ```bash
+    cd src
+    ```
+2.  Run the tracker GUI:
+    ```bash
+    python tracker_ui.py
+    ```
+    The tracker runs at `http://localhost:8000`, displaying peer and torrent information.
+
+### Run the Client
+
+1.  Run the client GUI:
+    ```bash
+    python ui.py
+    ```
+    Use the GUI to add torrents, create torrents, manage downloads/seeding, and view statistics.
+
+### Command-Line Usage (Optional)
+
+* **Download:**
+    ```bash
+    python peer/client.py path/to/torrent.torrent --base_path /path/to/download --download
+    ```
+* **Seed:**
+    ```bash
+    python peer/client.py path/to/torrent.torrent --base_path /path/to/files
+    ```
+
+### Creating a Torrent
+
+1.  In the GUI, click "Create Torrent".
+2.  Select files or directories to share.
+3.  Enter the tracker URL (`http://localhost:8000`).
+4.  Save the `.torrent` file.
+5.  Add the `.torrent` file to the client to seed or download.
+
+## Testing
+
+### Unit Tests
+
+1.  Navigate to the `tests` directory:
+    ```bash
+    cd tests
+    ```
+2.  Run the unit tests:
+    ```bash
+    python -m unittest discover
+    ```
+
+### Multi-Peer Simulation
+
+1.  Start the tracker:
+    ```bash
+    python src/tracker_ui.py
+    ```
+2.  Create a torrent with multiple files via the GUI.
+3.  Run multiple client instances (`python ui.py`) on different machines or terminals.
+4.  Add the torrent to each client, selecting appropriate download/seed directories.
+5.  Verify downloads complete, seeding occurs, and the tracker GUI shows correct peer information.
+
+## Assignment Compliance
+
+* **Tracker Protocol (15%):** Fully implemented with magnet links, event reporting, and peer list parsing.
+* **Torrent Download (30%):** Supports concurrent multi-peer downloads with multi-file mapping; improved with bitfield-based piece selection.
+* **Torrent Upload (15%):** Handles multiple concurrent uploads and seeding.
+* **User Interface (5%):** Comprehensive Tkinter GUI with detailed statistics.
+* **Readme (5%):** Updated to reflect GUI focus and bug fixes.
+* **Extra Credit (10%):** Implements tracker `/scrape` and simultaneous torrents.
+
+## Future Improvements
+
+* Implement advanced strategies (e.g., Super Seeding, End Game).
+* Add Distributed Hash Table (DHT) support.
+* Optimize peer selection with "4+1" peer limits and tit-for-tat.
