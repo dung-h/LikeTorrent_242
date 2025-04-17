@@ -183,39 +183,81 @@ class TorrentGUI:
     def select_torrent(self):
         torrent_file = filedialog.askopenfilename(filetypes=[("Torrent files", "*.torrent")])
         if torrent_file:
-            base_path = filedialog.askdirectory(title="Select Download/Seed Location", initialdir=self.DEFAULT_PATH)
-            if not base_path:
-                messagebox.showwarning("Warning", "No location selected")
-                return
-            try:
-                client = Client(torrent_file, base_path, port=6881)
-                self.clients[torrent_file] = client
-                self.paths[torrent_file] = base_path
-                self.queue_list.insert(tk.END, os.path.basename(torrent_file))
-                self.status_bar.config(text="Torrent added")
-                if not self.active_torrent:
-                    self.active_torrent = torrent_file
-                    self.torrent_file = torrent_file
-                if client.check_file_exists():
-                    self.running = True
-                    self.start_btn.config(state=tk.DISABLED)
-                    self.pause_btn.config(state=tk.NORMAL)
-                    self.stop_btn.config(state=tk.NORMAL)
-                    self.seed_thread = threading.Thread(target=client.listen_for_requests, daemon=False)
-                    self.seed_thread.start()
-                    self.event_queue.put(("state", "seeding"))
-                    self.status_bar.config(text="Seeding started")
-                else:
-                    self.start_btn.config(state=tk.NORMAL)
-                self.update_files_list()
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load torrent: {e}")
-                self.status_bar.config(text="Error loading torrent")
+            # Create port selection dialog
+            port_dialog = tk.Toplevel(self.root)
+            port_dialog.title("Connection Settings")
+            port_dialog.geometry("300x150")
+            port_dialog.resizable(False, False)
+            port_dialog.transient(self.root)
+            port_dialog.grab_set()
+            
+            # Center the dialog
+            port_dialog.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (port_dialog.winfo_width() // 2)
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (port_dialog.winfo_height() // 2)
+            port_dialog.geometry(f"+{x}+{y}")
+            
+            ttk.Label(port_dialog, text="Select port:").pack(pady=(10,5))
+            
+            port_var = tk.StringVar(value="6881")
+            port_entry = ttk.Spinbox(port_dialog, from_=1024, to=65535, textvariable=port_var, width=10)
+            port_entry.pack(pady=5)
+            
+            ttk.Label(port_dialog, text="Port range: 1024-65535").pack(pady=5)
+            
+            def continue_with_port():
+                try:
+                    port = int(port_var.get())
+                    if 1024 <= port <= 65535:
+                        port_dialog.destroy()
+                        self.select_download_location(torrent_file, port)
+                    else:
+                        messagebox.showerror("Invalid Port", "Please enter a port between 1024 and 65535")
+                except ValueError:
+                    messagebox.showerror("Invalid Port", "Please enter a valid port number")
+            
+            ttk.Button(port_dialog, text="Continue", command=continue_with_port).pack(pady=10)
+            
+            # Focus the entry
+            port_entry.select_range(0, tk.END)
+            port_entry.focus()
+    
+    def select_download_location(self, torrent_file, port):
+        base_path = filedialog.askdirectory(title="Select Download/Seed Location", initialdir=self.DEFAULT_PATH)
+        if not base_path:
+            messagebox.showwarning("Warning", "No location selected")
+            return
+        try:
+            client = Client(torrent_file, base_path, port=port)
+            self.clients[torrent_file] = client
+            self.paths[torrent_file] = base_path
+            # Add the port to the display name
+            display_name = f"{os.path.basename(torrent_file)} (Port: {port})"
+            self.queue_list.insert(tk.END, display_name)
+            self.status_bar.config(text=f"Torrent added on port {port}")
+            if not self.active_torrent:
+                self.active_torrent = torrent_file
+                self.torrent_file = torrent_file
+            if client.check_file_exists():
+                self.running = True
+                self.start_btn.config(state=tk.DISABLED)
+                self.pause_btn.config(state=tk.NORMAL)
+                self.stop_btn.config(state=tk.NORMAL)
+                self.seed_thread = threading.Thread(target=client.listen_for_requests, daemon=False)
+                self.seed_thread.start()
+                self.event_queue.put(("state", "seeding"))
+                self.status_bar.config(text=f"Seeding started on port {port}")
+            else:
+                self.start_btn.config(state=tk.NORMAL)
+            self.update_files_list()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load torrent: {e}")
+            self.status_bar.config(text="Error loading torrent")
 
     def create_torrent(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Create Torrent")
-        dialog.geometry("400x300")
+        dialog.geometry("400x350")  # Increased height for port selection
         
         ttk.Label(dialog, text="Select Files:").pack(pady=5)
         files_list = tk.Listbox(dialog, selectmode=tk.MULTIPLE, height=5)
@@ -233,6 +275,15 @@ class TorrentGUI:
         tracker_entry.insert(0, "http://localhost:8000")
         tracker_entry.pack(pady=5)
         
+        # Add port selection
+        ttk.Label(dialog, text="Client Port:").pack(pady=5)
+        port_var = tk.StringVar(value="6881")
+        port_frame = ttk.Frame(dialog)
+        port_frame.pack(pady=5)
+        port_entry = ttk.Spinbox(port_frame, from_=1024, to=65535, textvariable=port_var, width=10)
+        port_entry.pack(side=tk.LEFT)
+        ttk.Label(port_frame, text="(1024-65535)").pack(side=tk.LEFT, padx=5)
+        
         def create():
             files = [files_list.get(i) for i in files_list.curselection()]
             if not files:
@@ -242,30 +293,46 @@ class TorrentGUI:
             if not tracker:
                 messagebox.showwarning("Warning", "No tracker URL")
                 return
+            
+            try:
+                port = int(port_var.get())
+                if not (1024 <= port <= 65535):
+                    messagebox.showerror("Invalid Port", "Please enter a port between 1024 and 65535")
+                    return
+            except ValueError:
+                messagebox.showerror("Invalid Port", "Please enter a valid port number")
+                return
+                
             save_path = filedialog.asksaveasfilename(defaultextension=".torrent")
             if save_path:
                 try:
                     torrent_path = create_torrent_file(files, tracker, save_path)
                     time.sleep(0.5)
-                    messagebox.showinfo("Success", f"Torrent created: {torrent_path}\nAdd it manually to start seeding.")
+                    result = messagebox.askyesno("Success", 
+                                                f"Torrent created: {torrent_path}\n\nWould you like to add and seed it now?")
                     dialog.destroy()
                     self.status_bar.config(text="Torrent created")
+                    
+                    if result:
+                        self.select_torrent_file(torrent_path, port)
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to create torrent: {e}")
         
         ttk.Button(dialog, text="Create", command=create).pack(pady=10)
         ttk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=5)
-
-    def select_torrent_file(self, torrent_path):
+    
+    def select_torrent_file(self, torrent_path, port=6881):
         base_path = filedialog.askdirectory(title="Select Download/Seed Location")
         if not base_path:
             messagebox.showwarning("Warning", "No location selected")
             return
         try:
-            client = Client(torrent_path, base_path, port=6881)
+            client = Client(torrent_path, base_path, port=port)
             self.clients[torrent_path] = client
             self.paths[torrent_path] = base_path
-            self.queue_list.insert(tk.END, os.path.basename(torrent_path))
+            # Add the port to the display name
+            display_name = f"{os.path.basename(torrent_path)} (Port: {port})"
+            self.queue_list.insert(tk.END, display_name)
             self.active_torrent = torrent_path
             self.torrent_file = torrent_path
             if client.check_file_exists():
@@ -276,20 +343,22 @@ class TorrentGUI:
                 self.seed_thread = threading.Thread(target=client.listen_for_requests, daemon=False)
                 self.seed_thread.start()
                 self.event_queue.put(("state", "seeding"))
-                self.status_bar.config(text="Seeding started")
+                self.status_bar.config(text=f"Seeding started on port {port}")
             else:
                 self.start_btn.config(state=tk.NORMAL)
             self.update_files_list()
         except Exception as e:
             logging.error(f"Failed to load torrent {torrent_path}: {e}")
             messagebox.showerror("Error", f"Failed to load torrent: {e}")
-
+    
     def select_active_torrent(self, event):
         selection = self.queue_list.curselection()
         if selection:
-            torrent = self.queue_list.get(selection[0])
+            display_name = self.queue_list.get(selection[0])
+            # Extract the base name without the port information
+            torrent_base = display_name.split(" (Port:")[0]
             for path, client in self.clients.items():
-                if os.path.basename(path) == torrent:
+                if os.path.basename(path) == torrent_base:
                     self.active_torrent = path
                     self.torrent_file = path
                     self.start_btn.config(state=tk.NORMAL if client.state == "stopped" else tk.DISABLED)
@@ -297,6 +366,9 @@ class TorrentGUI:
                     self.pause_btn.config(state=tk.NORMAL if client.state in ["downloading", "seeding"] else tk.DISABLED)
                     self.stop_btn.config(state=tk.NORMAL if client.state in ["downloading", "seeding", "paused"] else tk.DISABLED)
                     self.update_files_list()
+                    # Show the port in the status bar
+                    port = client.port
+                    self.status_bar.config(text=f"Selected torrent on port {port}")
                     break
 
     def start_download(self):
@@ -304,22 +376,44 @@ class TorrentGUI:
             messagebox.showwarning("Warning", "No torrent selected")
             return
         client = self.clients[self.active_torrent]
+        
+        # Check if files already exist - if so, seed instead of downloading
         if client.check_file_exists():
-            self.status_bar.config(text="Files already exist, seeding instead")
+            self.status_bar.config(text="Files already exist, starting seeding...")
+            self.running = True
+            self.start_btn.config(state=tk.DISABLED)
+            self.resume_btn.config(state=tk.NORMAL)
+            self.pause_btn.config(state=tk.NORMAL)
+            self.stop_btn.config(state=tk.NORMAL)
+            self.seed_thread = threading.Thread(target=client.listen_for_requests, daemon=False)
+            self.seed_thread.start()
+            self.event_queue.put(("state", "seeding"))
             return
+            
         if self.download_thread and self.download_thread.is_alive():
             self.status_bar.config(text="Download already running")
             return
+            
         self.running = True
         self.start_btn.config(state=tk.DISABLED)
         self.resume_btn.config(state=tk.NORMAL)
         self.pause_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL)
         self.status_bar.config(text="Starting download...")
-        self.download_thread = threading.Thread(target=client.start_download, daemon=False)
+        
+        # Start download in a separate thread and set up automatic transition to seeding
+        def download_and_seed():
+            client.start_download()
+            # After download completes, automatically start seeding if not paused or stopped
+            if self.running and client.state != "stopped" and client.piece_manager.all_pieces_downloaded():
+                self.status_bar.config(text="Download complete, starting seeding...")
+                self.event_queue.put(("state", "seeding"))
+                client.listen_for_requests()
+        
+        self.download_thread = threading.Thread(target=download_and_seed, daemon=False)
         self.download_thread.start()
         self.event_queue.put(("state", "downloading"))
-
+        
     def resume_client(self):
         if not self.active_torrent or not self.clients.get(self.active_torrent):
             messagebox.showwarning("Warning", "No torrent selected")
@@ -358,6 +452,7 @@ class TorrentGUI:
         if not self.active_torrent or not self.clients.get(self.active_torrent):
             return
         client = self.clients[self.active_torrent]
+        original_port = client.port  # Store the original port
         client.stop()
         self.running = False
         if self.download_thread and self.download_thread.is_alive():
@@ -379,8 +474,9 @@ class TorrentGUI:
         self.state_label.config(text="State: Stopped")
         self.speed_label.config(text="Speed: 0 KB/s")
         self.status_bar.config(text="Client stopped")
-        self.clients[self.active_torrent] = Client(self.active_torrent, self.paths[self.active_torrent], port=6881)
-
+        # Use the original port when recreating the client
+        self.clients[self.active_torrent] = Client(self.active_torrent, self.paths[self.active_torrent], port=original_port)
+    
     def open_file(self, file_path):
         try:
             os.startfile(file_path)

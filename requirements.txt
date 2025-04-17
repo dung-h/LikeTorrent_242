@@ -4,3 +4,4 @@ requests
 bencodepy
 matplotlib
 Pillow
+python3-tk

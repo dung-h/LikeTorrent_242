@@ -9,9 +9,11 @@ This is a BitTorrent-like file-sharing application developed for the "Computer N
     * Concurrent downloading from multiple peers with piece-to-file mapping for multi-file torrents.
     * Seeding after download or from user-selected directories.
     * Piece verification via SHA-1 hashes.
+    * **Automatic Leecher-to-Seeder Transition:** Completed downloads automatically become seeders.
 * **GUI (`ui.py`):**
     * Add, create, and manage torrents in a queue.
     * Control downloads/seeding (start, pause, resume, stop).
+    * **Custom Port Selection:** Configure unique ports for each torrent to prevent collisions.
     * Tabs for:
         * **Overview:** Progress (%), state, speed graph (download/upload).
         * **Peers:** IP, port, pieces downloaded/uploaded, speeds.
@@ -20,6 +22,7 @@ This is a BitTorrent-like file-sharing application developed for the "Computer N
     * Dark/light theme toggle.
 * **Command-Line Support:** Optional `client.py` for downloading/seeding with specified paths.
 * **Multi-File Support:** Correctly handles torrents with multiple files (e.g., two videos).
+* **Multi-Instance Support:** Run multiple clients simultaneously on different ports.
 * **Extra Credit:**
     * Tracker `/scrape` endpoint for statistics (complete/incomplete peers).
     * Simultaneous torrent management via GUI.
@@ -32,6 +35,8 @@ This is a BitTorrent-like file-sharing application developed for the "Computer N
 * **Incorrect Peer Count:** Resolved by cleaning up stale `peer_stats` entries and counting only active peers.
 * **Speed Display Errors:** Improved by buffering bytes and using a moving average for smoother speed calculations.
 * **Peer Discovery:** Enhanced with more frequent tracker queries (every 15s) and dynamic peer integration.
+* **Port Collisions:** Resolved by adding custom port selection in the UI and preserving ports across client restarts.
+* **Leecher-to-Seeder Transition:** Fixed issues where finished downloads weren't properly becoming seeders by improving the transition logic.
 
 ## Requirements
 
@@ -64,12 +69,6 @@ LikeTorrent/
 │   │   └── tracker.py         # Flask-based HTTP tracker
 │   ├── ui.py                  # Tkinter client GUI
 │   └── tracker_ui.py          # Tkinter tracker GUI
-├── tests/
-│   ├── test_tracker.py
-│   ├── test_client.py
-│   ├── test_download.py
-│   ├── test_upload.py
-│   └── test_ui.py
 ├── requirements.txt
 └── README.md
 ```
@@ -95,7 +94,7 @@ LikeTorrent/
 
 ### Start the Tracker
 
-1.  Navigate to `src`:
+1.  Navigate to the src directory:
     ```bash
     cd src
     ```
@@ -117,11 +116,11 @@ LikeTorrent/
 
 * **Download:**
     ```bash
-    python peer/client.py path/to/torrent.torrent --base_path /path/to/download --download
+    python peer/client.py path/to/torrent.torrent --base_path /path/to/download --download --port 6882
     ```
 * **Seed:**
     ```bash
-    python peer/client.py path/to/torrent.torrent --base_path /path/to/files
+    python peer/client.py path/to/torrent.torrent --base_path /path/to/files --port 6883
     ```
 
 ### Creating a Torrent
@@ -129,21 +128,19 @@ LikeTorrent/
 1.  In the GUI, click "Create Torrent".
 2.  Select files or directories to share.
 3.  Enter the tracker URL (`http://localhost:8000`).
-4.  Save the `.torrent` file.
-5.  Add the `.torrent` file to the client to seed or download.
+4.  Select a custom port for this torrent.
+5.  Save the `.torrent` file.
+6.  Add the `.torrent` file to the client to seed or download.
 
-## Testing
+### Adding an Existing Torrent
 
-### Unit Tests
+1. In the GUI, click "Add Torrent".
+2. Select the `.torrent` file.
+3. Choose a unique port for this torrent to avoid collisions.
+4. Select the download/seed location.
+5. The torrent will automatically start seeding if files exist or begin downloading otherwise.
 
-1.  Navigate to the `tests` directory:
-    ```bash
-    cd tests
-    ```
-2.  Run the unit tests:
-    ```bash
-    python -m unittest discover
-    ```
+## Manual Testing
 
 ### Multi-Peer Simulation
 
@@ -153,20 +150,22 @@ LikeTorrent/
     ```
 2.  Create a torrent with multiple files via the GUI.
 3.  Run multiple client instances (`python ui.py`) on different machines or terminals.
-4.  Add the torrent to each client, selecting appropriate download/seed directories.
+4.  Add the torrent to each client, selecting appropriate download/seed directories and different ports.
 5.  Verify downloads complete, seeding occurs, and the tracker GUI shows correct peer information.
+6.  Observe how completed downloads automatically transition to seeding.
 
 ## Assignment Compliance
 
 * **Tracker Protocol (15%):** Fully implemented with magnet links, event reporting, and peer list parsing.
 * **Torrent Download (30%):** Supports concurrent multi-peer downloads with multi-file mapping; improved with bitfield-based piece selection.
-* **Torrent Upload (15%):** Handles multiple concurrent uploads and seeding.
-* **User Interface (5%):** Comprehensive Tkinter GUI with detailed statistics.
-* **Readme (5%):** Updated to reflect GUI focus and bug fixes.
-* **Extra Credit (10%):** Implements tracker `/scrape` and simultaneous torrents.
+* **Torrent Upload (15%):** Handles multiple concurrent uploads and seeding with proper port handling.
+* **User Interface (5%):** Comprehensive Tkinter GUI with detailed statistics and port configuration.
+* **Readme (5%):** Updated to reflect GUI focus, port handling, and bug fixes.
+* **Extra Credit (10%):** Implements tracker `/scrape`, simultaneous torrents, and custom port selection.
 
 ## Future Improvements
 
 * Implement advanced strategies (e.g., Super Seeding, End Game).
 * Add Distributed Hash Table (DHT) support.
 * Optimize peer selection with "4+1" peer limits and tit-for-tat.
+* Implement UPnP for automatic port forwarding.
