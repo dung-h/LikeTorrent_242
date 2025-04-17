@@ -76,7 +76,7 @@ LikeTorrent/
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/dung-h/LikeTorrent_242.git
     cd LikeTorrent
     ```
 2.  **Create and activate a virtual environment:**
