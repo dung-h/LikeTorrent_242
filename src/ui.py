@@ -563,6 +563,16 @@ class TorrentGUI:
 
                 down_speed = client.get_speed(upload=False) if self.running else 0.0
                 up_speed = client.get_speed(upload=True) if self.running else 0.0
+                if client.state == 'seeding' and up_speed < 0.01:
+                    # Check if there are any active peers receiving uploads
+                    if any(stats.pieces_uploaded > 0 and time.time() - stats.last_update < 60 
+                        for stats in client.peer_stats.values()):
+                        # If there are active peers but no speed, show "Ready" status for seeder
+                        self.status_bar.config(text="Seeding: Ready (waiting for downloaders)")
+                    else:
+                        # No active peers
+                        self.status_bar.config(text="Seeding: No active downloaders connected")
+                        
                 self.down_speeds.append(down_speed)
                 self.up_speeds.append(up_speed)
                 if len(self.down_speeds) > 5:

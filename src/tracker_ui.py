@@ -7,6 +7,9 @@ import threading
 import logging
 import time
 import json
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+from matplotlib import pyplot as plt
 
 # Add the src directory to the path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +22,7 @@ class TrackerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("LikeTorrent Tracker")
-        self.root.geometry("600x400")
+        self.root.geometry("800x600")  # Increased window size for better display
         self.tracker = Tracker()
         self.running = True
         self.ui_lock = threading.Lock()
@@ -28,8 +31,16 @@ class TrackerGUI:
         self.main_frame = ttk.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Stats
-        self.stats_frame = ttk.Frame(self.main_frame)
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Overview tab
+        self.overview_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.overview_tab, text="Overview")
+        
+        # Stats frame in overview tab
+        self.stats_frame = ttk.Frame(self.overview_tab)
         self.stats_frame.pack(fill=tk.X, pady=5)
         self.peer_count = ttk.Label(self.stats_frame, text="Peers: 0")
         self.peer_count.pack(side=tk.LEFT, padx=5)
@@ -37,65 +48,283 @@ class TrackerGUI:
         self.torrent_count.pack(side=tk.LEFT, padx=5)
         self.announce_label = ttk.Label(self.stats_frame, text="Announces: 0")
         self.announce_label.pack(side=tk.LEFT, padx=5)
-
-        # Peer table
-        self.tree = ttk.Treeview(self.main_frame, columns=("PeerID", "IP", "Port", "Torrent", "Event"), show="headings")
-        self.tree.heading("PeerID", text="Peer ID")
-        self.tree.heading("IP", text="IP Address")
-        self.tree.heading("Port", text="Port")
-        self.tree.heading("Torrent", text="Torrent Hash")
-        self.tree.heading("Event", text="Event")
-        self.tree.column("PeerID", width=150)
-        self.tree.column("IP", width=100)
-        self.tree.column("Port", width=80)
-        self.tree.column("Torrent", width=150)
-        self.tree.column("Event", width=80)
-        self.tree.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.scrollbar = ttk.Scrollbar(self.main_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=self.scrollbar.set)
-        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
+        self.bandwidth_label = ttk.Label(self.stats_frame, text="Total: 0 KB/s ↓ | 0 KB/s ↑")
+        self.bandwidth_label.pack(side=tk.LEFT, padx=5)
+        
+        # Graph for overall bandwidth
+        self.fig, self.ax = plt.subplots(figsize=(8, 4))  # Larger graph for better visibility
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.overview_tab)
+        self.canvas.get_tk_widget().pack(pady=5, fill=tk.BOTH, expand=True)
+        self.ax.set_xlabel("Time (s)")
+        self.ax.set_ylabel("Speed (KB/s)")
+        self.ax.grid(True)
+        
+        # Setup data for graph
+        self.speed_history = {"download": [], "upload": []}
+        self.time_history = []
+        
+        # Peers tab
+        self.peers_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.peers_tab, text="Peers")
+        
+        # Enhanced peer table with rates
+        self.peers_tree = ttk.Treeview(self.peers_tab, 
+            columns=("PeerID", "IP", "Port", "Torrent", "Event", "Downloaded", "Uploaded", "DownRate", "UpRate"), 
+            show="headings")
+        self.peers_tree.heading("PeerID", text="Peer ID")
+        self.peers_tree.heading("IP", text="IP Address")
+        self.peers_tree.heading("Port", text="Port")
+        self.peers_tree.heading("Torrent", text="Torrent Hash")
+        self.peers_tree.heading("Event", text="Event")
+        self.peers_tree.heading("Downloaded", text="Downloaded")
+        self.peers_tree.heading("Uploaded", text="Uploaded")
+        self.peers_tree.heading("DownRate", text="Down KB/s")
+        self.peers_tree.heading("UpRate", text="Up KB/s")
+        
+        # Set column widths
+        self.peers_tree.column("PeerID", width=100)
+        self.peers_tree.column("IP", width=100)
+        self.peers_tree.column("Port", width=60)
+        self.peers_tree.column("Torrent", width=100)
+        self.peers_tree.column("Event", width=80)
+        self.peers_tree.column("Downloaded", width=100)
+        self.peers_tree.column("Uploaded", width=100)
+        self.peers_tree.column("DownRate", width=80)
+        self.peers_tree.column("UpRate", width=80)
+        
+        # Add scrollbar and packing
+        self.peers_scrollbar = ttk.Scrollbar(self.peers_tab, orient=tk.VERTICAL, command=self.peers_tree.yview)
+        self.peers_tree.configure(yscrollcommand=self.peers_scrollbar.set)
+        self.peers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.peers_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Torrents tab
+        self.torrents_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.torrents_tab, text="Torrents")
+        
+        # Torrent table
+        self.torrents_tree = ttk.Treeview(self.torrents_tab, 
+            columns=("Hash", "Peers", "Complete", "Incomplete", "Downloaded", "Uploaded"), 
+            show="headings")
+        self.torrents_tree.heading("Hash", text="Torrent Hash")
+        self.torrents_tree.heading("Peers", text="Peers")
+        self.torrents_tree.heading("Complete", text="Complete")
+        self.torrents_tree.heading("Incomplete", text="Incomplete")
+        self.torrents_tree.heading("Downloaded", text="Total Downloaded")
+        self.torrents_tree.heading("Uploaded", text="Total Uploaded")
+        
+        # Set column widths
+        self.torrents_tree.column("Hash", width=200)
+        self.torrents_tree.column("Peers", width=60)
+        self.torrents_tree.column("Complete", width=80)
+        self.torrents_tree.column("Incomplete", width=80)
+        self.torrents_tree.column("Downloaded", width=120)
+        self.torrents_tree.column("Uploaded", width=120)
+        
+        # Add scrollbar and packing
+        self.torrents_scrollbar = ttk.Scrollbar(self.torrents_tab, orient=tk.VERTICAL, command=self.torrents_tree.yview)
+        self.torrents_tree.configure(yscrollcommand=self.torrents_scrollbar.set)
+        self.torrents_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.torrents_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Add search and filter controls
+        self.filter_frame = ttk.Frame(self.main_frame)
+        self.filter_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(self.filter_frame, text="Search:").pack(side=tk.LEFT, padx=5)
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(self.filter_frame, textvariable=self.search_var)
+        self.search_entry.pack(side=tk.LEFT, padx=5)
+        self.search_entry.bind("<KeyRelease>", self.filter_peers)
+        
         # Status bar
-        self.status_bar = ttk.Label(self.main_frame, text="Tracker starting...", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar = ttk.Label(self.main_frame, text="Tracker running on port 8000", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
+        
         # Start server
         self.server_thread = threading.Thread(target=self.tracker.run, daemon=True)
         self.server_thread.start()
-        self.status_bar.config(text="Tracker running on port 8000")
+        
+        # Start UI updates
         self.update_ui()
+    def filter_peers(self, event=None):
+        """Filter the peers list based on search input"""
+        search_text = self.search_var.get().lower()
+        
+        # Clear and repopulate the peers tree with filtered results
+        for item in self.peers_tree.get_children():
+            self.peers_tree.delete(item)
+        
+        try:
+            torrents = self.tracker.get_torrents()
+            for torrent_hash, torrent_data in torrents.items():
+                peers = torrent_data.get("peers", {})
+                for peer_id, peer in peers.items():
+                    # Check if search text matches any field
+                    if (search_text in peer_id.lower() or 
+                        search_text in str(peer.get("ip", "")).lower() or 
+                        search_text in str(peer.get("port", "")) or 
+                        search_text in torrent_hash.lower() or
+                        search_text in str(peer.get("event", "")).lower()):
+                        
+                        try:
+                            # Convert values to float to ensure they're numbers
+                            download_rate = float(peer.get("download_rate", 0))
+                            upload_rate = float(peer.get("upload_rate", 0))
+                            downloaded = float(peer.get("downloaded", 0))
+                            uploaded = float(peer.get("uploaded", 0))
+                            
+                            self.peers_tree.insert("", tk.END, values=(
+                                peer_id[:10] + "..." if len(peer_id) > 10 else peer_id,
+                                peer.get("ip", "unknown"),
+                                peer.get("port", "unknown"),
+                                torrent_hash[:10] + "..." if len(torrent_hash) > 10 else torrent_hash,
+                                peer.get("event", "unknown"),
+                                f"{downloaded/1024/1024:.2f} MB",
+                                f"{uploaded/1024/1024:.2f} MB",
+                                f"{download_rate:.2f}",
+                                f"{upload_rate:.2f}"
+                            ))
+                        except Exception as e:
+                            logging.error(f"Error displaying peer {peer_id}: {e}")
+        except Exception as e:
+            logging.error(f"Filter error: {e}")
 
     def update_ui(self):
         if not self.running:
             return
         try:
             with self.ui_lock:
-                for item in self.tree.get_children():
-                    self.tree.delete(item)
+                # Clear existing entries
+                for item in self.peers_tree.get_children():
+                    self.peers_tree.delete(item)
+                for item in self.torrents_tree.get_children():
+                    self.torrents_tree.delete(item)
                 
-                torrents = self.tracker.get_torrents()
-                peer_count = 0
-                for torrent_hash, peers in torrents.items():
-                    for peer_id, peer in peers.items():
-                        self.tree.insert("", tk.END, values=(
-                            peer_id[:10] + "..." if len(peer_id) > 10 else peer_id,
-                            peer["ip"],
-                            peer["port"],
-                            torrent_hash[:10] + "..." if len(torrent_hash) > 10 else torrent_hash,
-                            peer["event"]
+                # Update torrents and peers
+                try:
+                    torrents = self.tracker.get_torrents()
+                    total_download_rate = 0
+                    total_upload_rate = 0
+                    peer_count = 0
+                    
+                    # Process each torrent
+                    for torrent_hash, torrent_data in torrents.items():
+                        # Extract peers from the torrent data
+                        peers = torrent_data.get("peers", {})
+                        
+                        complete = sum(1 for p in peers.values() if p.get("event") == "completed")
+                        incomplete = len(peers) - complete
+                        total_down = sum(p.get("downloaded", 0) for p in peers.values())
+                        total_up = sum(p.get("uploaded", 0) for p in peers.values())
+                        
+                        # Add to torrent tree
+                        self.torrents_tree.insert("", tk.END, values=(
+                            torrent_hash[:15] + "..." if len(torrent_hash) > 15 else torrent_hash,
+                            len(peers),
+                            complete,
+                            incomplete,
+                            f"{total_down/1024/1024:.2f} MB",
+                            f"{total_up/1024/1024:.2f} MB"
                         ))
-                        peer_count += 1
-                        logging.debug(f"Added peer {peer_id} for torrent {torrent_hash}")
-                
-                self.peer_count.config(text=f"Peers: {peer_count}")
-                self.torrent_count.config(text=f"Torrents: {len(torrents)}")
-                self.announce_label.config(text=f"Announces: {self.tracker.announce_count}")
+                        
+                        # Process peers for this torrent
+                        for peer_id, peer in peers.items():
+                            try:
+                                download_rate = float(peer.get("download_rate", 0))
+                                upload_rate = float(peer.get("upload_rate", 0))
+                                downloaded = float(peer.get("downloaded", 0))
+                                uploaded = float(peer.get("uploaded", 0))
+                                
+                                total_download_rate += download_rate
+                                total_upload_rate += upload_rate
+                                
+                                # Add to peer tree with rate info
+                                self.peers_tree.insert("", tk.END, values=(
+                                    peer_id[:10] + "..." if len(peer_id) > 10 else peer_id,
+                                    peer.get("ip", "unknown"),
+                                    peer.get("port", "unknown"),
+                                    torrent_hash[:10] + "..." if len(torrent_hash) > 10 else torrent_hash,
+                                    peer.get("event", "unknown"),
+                                    f"{downloaded/1024/1024:.2f} MB",
+                                    f"{uploaded/1024/1024:.2f} MB",
+                                    f"{download_rate:.2f}",
+                                    f"{upload_rate:.2f}"
+                                ))
+                                peer_count += 1
+                            except Exception as peer_error:
+                                logging.error(f"Error processing peer {peer_id}: {peer_error}")
+                    
+                    # Update summary labels
+                    self.peer_count.config(text=f"Peers: {peer_count}")
+                    self.torrent_count.config(text=f"Torrents: {len(torrents)}")
+                    self.announce_label.config(text=f"Announces: {self.tracker.announce_count}")
+                    self.bandwidth_label.config(text=f"Total: {total_download_rate:.2f} KB/s ↓ | {total_upload_rate:.2f} KB/s ↑")
+                    
+                    # Initialize arrays on first run
+                    if not hasattr(self, 'first_time') or self.first_time is None:
+                        self.first_time = time.time()
+                        self.time_history = [0]
+                        self.speed_history["download"] = [0]
+                        self.speed_history["upload"] = [0]
+                        self.point_count = 1
+                    
+                    # Add new data point with consistent indexing
+                    self.point_count += 1
+                    self.speed_history["download"].append(total_download_rate)
+                    self.speed_history["upload"].append(total_upload_rate)
+                    self.time_history.append(self.point_count - 1)  # Use a simple counter for x-axis
+                    
+                    # Ensure all arrays have the same length
+                    min_len = min(len(self.time_history), 
+                                  len(self.speed_history["download"]), 
+                                  len(self.speed_history["upload"]))
+                    
+                    if min_len < len(self.time_history):
+                        self.time_history = self.time_history[:min_len]
+                    if min_len < len(self.speed_history["download"]):
+                        self.speed_history["download"] = self.speed_history["download"][:min_len]
+                    if min_len < len(self.speed_history["upload"]):
+                        self.speed_history["upload"] = self.speed_history["upload"][:min_len]
+                    
+                    # Maximum history length
+                    max_history = 300
+                    if len(self.time_history) > max_history:
+                        self.time_history = self.time_history[-max_history:]
+                        self.speed_history["download"] = self.speed_history["download"][-max_history:]
+                        self.speed_history["upload"] = self.speed_history["upload"][-max_history:]
+                    
+                except Exception as data_error:
+                    logging.error(f"Error processing tracker data: {data_error}")
+                    self.status_bar.config(text=f"Data error: {data_error}")
+                        
+                # Update the graph
+                try:
+                    self.ax.clear()
+                    if len(self.time_history) > 1:  # Only plot if we have at least 2 points
+                        # Double-check lengths for plotting - shouldn't be needed but just in case
+                        plot_len = min(len(self.time_history), 
+                                      len(self.speed_history["download"]), 
+                                      len(self.speed_history["upload"]))
+                        
+                        x_data = self.time_history[:plot_len]
+                        download_data = self.speed_history["download"][:plot_len]
+                        upload_data = self.speed_history["upload"][:plot_len]
+                        
+                        self.ax.plot(x_data, download_data, label="Download", color="#4682B4")
+                        self.ax.plot(x_data, upload_data, label="Upload", color="#FFA500")
+                        self.ax.legend()
+                    self.ax.set_xlabel("Time (s)")
+                    self.ax.set_ylabel("Speed (KB/s)")
+                    self.ax.grid(True)
+                    self.canvas.draw()
+                except Exception as graph_error:
+                    logging.error(f"Graph error: {graph_error}")
+                    
         except Exception as e:
-            logging.error(f"UI update error: {e}")
+            logging.error(f"Tracker UI update error: {e}")
             self.status_bar.config(text=f"Error: {e}")
         
         self.root.after(1000, self.update_ui)
-
 if __name__ == "__main__":
     root = tk.Tk()
     app = TrackerGUI(root)

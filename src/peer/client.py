@@ -166,6 +166,9 @@ class Client:
                     "peer_id": self.peer_id,
                     "port": self.port,
                     "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"],
+                    "uploaded": self.bytes_uploaded,  # Add this to track total uploaded
+                    "download_rate": self.get_speed(upload=False),  # Report current download rate
+                    "upload_rate": self.get_speed(upload=True),
                     "event": event,
                     "seeding": self.piece_manager.all_pieces_downloaded(),
                     "magnet": magnet
@@ -227,20 +230,43 @@ class Client:
         logging.info(f"All pieces complete: {complete}")
         return complete
 
+    # def get_speed(self, upload=False):
+    #     with self.speed_lock:
+    #         elapsed = time.time() - self.last_speed_update
+    #         speed = 0.0
+    #         if elapsed > 0.05:
+    #             speed = (self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded) / elapsed / 1024
+    #             logging.info(f"Speed calc: {self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded} bytes / {elapsed:.2f}s = {speed:.2f} KB/s")
+    #         if upload:
+    #             self.temp_bytes_uploaded = 0
+    #         else:
+    #             self.temp_bytes_downloaded = 0
+    #         self.last_speed_update = time.time()
+    #         return min(speed, 1024 * 1024)  # Cap at 1 GB/s
+
+        # Add to Client class in client.py to improve speed calculation
     def get_speed(self, upload=False):
         with self.speed_lock:
             elapsed = time.time() - self.last_speed_update
             speed = 0.0
             if elapsed > 0.05:
-                speed = (self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded) / elapsed / 1024
-                logging.info(f"Speed calc: {self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded} bytes / {elapsed:.2f}s = {speed:.2f} KB/s")
-            if upload:
-                self.temp_bytes_uploaded = 0
-            else:
-                self.temp_bytes_downloaded = 0
-            self.last_speed_update = time.time()
+                # Get the appropriate byte counter
+                bytes_counter = self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded
+                
+                # Avoid division by zero and ensure meaningful updates
+                if bytes_counter > 0:
+                    speed = bytes_counter / elapsed / 1024
+                    logging.info(f"{'Upload' if upload else 'Download'} speed: {bytes_counter} bytes / {elapsed:.2f}s = {speed:.2f} KB/s")
+                    
+                    # Only reset counters if we actually have data to report
+                    if upload:
+                        self.temp_bytes_uploaded = 0
+                    else:
+                        self.temp_bytes_downloaded = 0
+                    self.last_speed_update = time.time()
+            
             return min(speed, 1024 * 1024)  # Cap at 1 GB/s
-
+        
     def cleanup_peer_stats(self):
         while self.running:
             with self.db_lock:
@@ -446,9 +472,11 @@ class Client:
                                 logging.warning(f"Failed to send chunk to {addr}")
                                 break
                         
+                                               
                         if total_sent == len(piece_data):
                             with self.speed_lock:
                                 self.temp_bytes_uploaded += total_sent
+                                logging.info(f"Added {total_sent} bytes to upload counter, now {self.temp_bytes_uploaded}")
                             if peer_id not in self.peer_stats:
                                 self.peer_stats[peer_id] = PeerStats(peer_id, addr[0], addr[1])
                             self.peer_stats[peer_id].update_upload(total_sent)
