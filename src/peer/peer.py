@@ -24,6 +24,9 @@ class Peer:
             response = self.sock.recv(1024).decode().strip()
             if response == "ESTABLISHED":
                 logging.info(f"Successfully connected to {self.peer_id}")
+                # Exchange bitfields
+                self.send_bitfield()
+                self.available_pieces = self.receive_bitfield()
                 return True
             else:
                 logging.warning(f"Failed to establish connection with {self.peer_id}: {response}")
@@ -71,8 +74,7 @@ class Peer:
                 pass
             self.sock = None
 
-    # Commented out bitfield methods to restore original behavior
-    """
+        # In peer.py, uncomment and improve these methods:
     def send_bitfield(self):
         try:
             bitfield = bytearray((self.piece_manager.total_pieces + 7) // 8)
@@ -81,23 +83,26 @@ class Peer:
                     bitfield[i // 8] |= 1 << (7 - (i % 8))
             self.sock.send(f"BITFIELD:{bitfield.hex()}".encode())
             logging.info(f"Sent bitfield to {self.peer_id}")
+            return True
         except Exception as e:
             logging.error(f"Failed to send bitfield to {self.peer_id}: {e}")
-
+            return False
+    
     def receive_bitfield(self):
         try:
             self.sock.settimeout(2)
             data = self.sock.recv(1024).decode().strip()
             if data.startswith("BITFIELD:"):
-                bitfield = bytes.fromhex(data.split(":")[1])
+                bitfield_hex = data.split(":")[1]
+                bitfield = bytes.fromhex(bitfield_hex)
                 pieces = [False] * self.piece_manager.total_pieces
                 for i in range(self.piece_manager.total_pieces):
                     if i // 8 < len(bitfield):
                         pieces[i] = bool(bitfield[i // 8] & (1 << (7 - (i % 8))))
-                logging.info(f"Received bitfield from {self.peer_id}: {pieces}")
+                logging.info(f"Received bitfield from {self.peer_id}: {sum(pieces)} pieces available")
                 return pieces
             logging.debug(f"No bitfield received from {self.peer_id}")
+            return [True] * self.piece_manager.total_pieces  # Assume all pieces available if no bitfield
         except Exception as e:
             logging.error(f"Bitfield receive error from {self.peer_id}: {e}")
-        return None
-    """
+            return [True] * self.piece_manager.total_pieces  # Fallback assumption

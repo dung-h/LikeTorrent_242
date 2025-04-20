@@ -43,10 +43,18 @@ class Tracker:
                     uploaded BIGINT DEFAULT 0,
                     download_rate FLOAT DEFAULT 0,
                     upload_rate FLOAT DEFAULT 0,
+                    seeding BOOLEAN DEFAULT 0,
                     PRIMARY KEY (peer_id, torrent_hash),
                     FOREIGN KEY (torrent_hash) REFERENCES torrents(torrent_hash)
                 )
             """)
+            
+            # Check if seeding column exists, add it if it doesn't
+            cursor.execute("PRAGMA table_info(peers)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'seeding' not in columns:
+                cursor.execute("ALTER TABLE peers ADD COLUMN seeding BOOLEAN DEFAULT 0")
+            
             conn.commit()
         logging.info("Database initialized")
 
@@ -65,9 +73,16 @@ class Tracker:
                 uploaded = int(request.args.get('uploaded', 0))
                 download_rate = float(request.args.get('download_rate', 0))
                 upload_rate = float(request.args.get('upload_rate', 0))
+                
+                # Add seeding flag to better identify seeders
+                seeding = request.args.get('seeding', 'false').lower() == 'true'
+                
+                # If download rate is near zero and has downloaded data, likely a seeder
+                if download_rate < 0.1 and downloaded > 0 and event == 'started':
+                    seeding = True
         
                 logging.info(f"Announce: peer_id={peer_id}, torrent_hash={torrent_hash}, ip={ip}, port={port}, "
-                            f"event={event}, down_rate={download_rate:.2f}, up_rate={upload_rate:.2f}")
+                            f"event={event}, down_rate={download_rate:.2f}, up_rate={upload_rate:.2f}, seeding={seeding}")
         
                 with self.lock:
                     self.announce_count += 1
@@ -79,13 +94,13 @@ class Tracker:
                         if event == 'stopped':
                             cursor.execute("DELETE FROM peers WHERE peer_id = ? AND torrent_hash = ?", (peer_id, torrent_hash))
                         else:
-                            # Update peer with rate information
+                            # Update peer with rate information and seeding flag
                             cursor.execute("""
                                 INSERT OR REPLACE INTO peers 
-                                (peer_id, torrent_hash, ip, port, event, last_seen, downloaded, uploaded, download_rate, upload_rate)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                (peer_id, torrent_hash, ip, port, event, last_seen, downloaded, uploaded, download_rate, upload_rate, seeding)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (peer_id, torrent_hash, ip, int(port) if port.isdigit() else 0, event, time.time(),
-                                  downloaded, uploaded, download_rate, upload_rate))
+                                  downloaded, uploaded, download_rate, upload_rate, seeding))
                             
                             # Update torrent totals
                             if event == 'completed' or event == 'started':
@@ -98,7 +113,7 @@ class Tracker:
                         
                         # Get peers for this torrent with additional information
                         cursor.execute("""
-                            SELECT peer_id, ip, port, event, downloaded, uploaded, download_rate, upload_rate
+                            SELECT peer_id, ip, port, event, downloaded, uploaded, download_rate, upload_rate, seeding
                             FROM peers WHERE torrent_hash = ?
                         """, (torrent_hash,))
                         
@@ -110,7 +125,8 @@ class Tracker:
                             "downloaded": row[4],
                             "uploaded": row[5],
                             "download_rate": row[6],
-                            "upload_rate": row[7]
+                            "upload_rate": row[7],
+                            "seeding": bool(row[8]) if len(row) > 8 else False
                         } for row in cursor.fetchall()]
                         
                         conn.commit()
@@ -121,7 +137,6 @@ class Tracker:
                 logging.error(f"Announce error: {e}")
                 return jsonify({'error': str(e)}), 500
         @self.app.route('/scrape', methods=['GET'])
-
         def scrape():
             try:
                 torrent_hash = request.args.get('torrent_hash')
@@ -167,6 +182,9 @@ class Tracker:
                 "peers": {}
             } for row in cursor.fetchall()}
             
+            # Define activity threshold (e.g., 60 seconds)
+            activity_threshold = time.time() - 60
+            
             cursor.execute("""
                 SELECT torrent_hash, peer_id, ip, port, event, last_seen, 
                        downloaded, uploaded, download_rate, upload_rate 
@@ -176,16 +194,23 @@ class Tracker:
             for row in cursor.fetchall():
                 torrent_hash = row[0]
                 peer_id = row[1]
+                last_seen = row[5]
+                
+                # Reset rates to zero if peer hasn't been seen recently
+                is_active = last_seen > activity_threshold
+                download_rate = row[8] if is_active else 0
+                upload_rate = row[9] if is_active else 0
+                
                 torrents[torrent_hash]["peers"][peer_id] = {
                     'peer_id': peer_id,
                     'ip': row[2],
                     'port': row[3],
                     'event': row[4],
-                    'last_seen': row[5],
+                    'last_seen': last_seen,
                     'downloaded': row[6],
                     'uploaded': row[7],
-                    'download_rate': row[8],
-                    'upload_rate': row[9]
+                    'download_rate': download_rate,
+                    'upload_rate': upload_rate
                 }
             return torrents
 

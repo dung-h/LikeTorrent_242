@@ -108,14 +108,62 @@ class Client:
         self.active_connections = []
         self.peer_stats = {}
         self.peer_priority = queue.Queue()
+        self.max_upload_slots = 4  # Standard BitTorrent uses 4+1 slots
+        self.upload_slots = {}  # Dictionary to track active upload slots
+        self.upload_slot_lock = threading.Lock()
+        self.last_slot_rotation = time.time()
+        self.slot_rotation_interval = 30 
         logging.info(f"Client initialized: torrent={torrent_file}, base_path={base_path}, port={self.port}")
         threading.Thread(target=self.cleanup_peer_stats, daemon=True).start()
+
 
     def load_metainfo(self, torrent_file):
         return parse_torrent(torrent_file)
 
     def generate_peer_id(self):
         return ''.join(random.choices('0123456789abcdef', k=20))
+    
+    def calculate_piece_rarity(self):
+        """Calculate the rarity of each piece across all peers"""
+        rarity = [0] * self.piece_manager.total_pieces
+        available_pieces_by_peer = {}
+        
+        # Get available pieces from each peer
+        for peer in self.peers:
+            peer_id = peer["peer_id"]
+            if peer_id not in available_pieces_by_peer:
+                # Create a mock peer to get bitfield
+                mock_peer = Peer(peer_id, peer["ip"], peer["port"], self.piece_manager)
+                available = None
+                try:
+                    if mock_peer.connect():
+                        available = mock_peer.available_pieces
+                        mock_peer.close()
+                except:
+                    if mock_peer:
+                        mock_peer.close()
+                
+                if available is None:
+                    # If we can't get the bitfield, assume all pieces are available
+                    available = [True] * self.piece_manager.total_pieces
+                available_pieces_by_peer[peer_id] = available
+        
+        # Calculate rarity of each piece
+        for peer_id, pieces in available_pieces_by_peer.items():
+            for i, has_piece in enumerate(pieces):
+                if has_piece:
+                    rarity[i] += 1
+        
+        # Convert counts to rarity (lower count = rarer)
+        # Pieces that no peer has get a very high value (ensure they're downloaded last)
+        for i in range(len(rarity)):
+            if rarity[i] == 0:
+                rarity[i] = 1000  # Very high value for unavailable pieces
+            else:
+                rarity[i] = 1 / rarity[i]  # Invert count to get rarity
+        
+        logging.info(f"Piece rarity calculated: {rarity}")
+        return rarity
 
     def find_port(self, start_port):
         port = start_port
@@ -166,11 +214,11 @@ class Client:
                     "peer_id": self.peer_id,
                     "port": self.port,
                     "downloaded": sum(self.piece_manager.have_pieces) * self.metainfo["piece_length"],
-                    "uploaded": self.bytes_uploaded,  # Add this to track total uploaded
-                    "download_rate": self.get_speed(upload=False),  # Report current download rate
+                    "uploaded": self.bytes_uploaded,
+                    "download_rate": self.get_speed(upload=False),
                     "upload_rate": self.get_speed(upload=True),
                     "event": event,
-                    "seeding": self.piece_manager.all_pieces_downloaded(),
+                    "seeding": self.piece_manager.all_pieces_downloaded(),  # Explicitly indicate seeding state
                     "magnet": magnet
                 }
                 logging.info(f"Contacting tracker {tracker_url}/announce with params: {params}")
@@ -230,21 +278,6 @@ class Client:
         logging.info(f"All pieces complete: {complete}")
         return complete
 
-    # def get_speed(self, upload=False):
-    #     with self.speed_lock:
-    #         elapsed = time.time() - self.last_speed_update
-    #         speed = 0.0
-    #         if elapsed > 0.05:
-    #             speed = (self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded) / elapsed / 1024
-    #             logging.info(f"Speed calc: {self.temp_bytes_uploaded if upload else self.temp_bytes_downloaded} bytes / {elapsed:.2f}s = {speed:.2f} KB/s")
-    #         if upload:
-    #             self.temp_bytes_uploaded = 0
-    #         else:
-    #             self.temp_bytes_downloaded = 0
-    #         self.last_speed_update = time.time()
-    #         return min(speed, 1024 * 1024)  # Cap at 1 GB/s
-
-        # Add to Client class in client.py to improve speed calculation
     def get_speed(self, upload=False):
         with self.speed_lock:
             elapsed = time.time() - self.last_speed_update
@@ -300,13 +333,20 @@ class Client:
         
         logging.info(f"Need to download {len(missing_pieces)} pieces")
         
+        # Calculate piece rarity
+        rarity = self.calculate_piece_rarity()
+        
+        # Sort missing pieces by rarity (rarest first)
+        missing_pieces.sort(key=lambda p: rarity[p], reverse=True)
+        
         piece_queue = queue.Queue()
         requested_pieces = set()
         queue_lock = threading.Lock()
         
+        # Add pieces to queue in rarity order
         for piece_index in missing_pieces:
             piece_queue.put(piece_index)
-        
+    
         max_retries = 3
         max_concurrent = 2
         active_threads = []
@@ -328,82 +368,86 @@ class Client:
                     except queue.Empty:
                         break
                 
-                available_peers = [(Peer(peer["peer_id"], peer["ip"], peer["port"], self.piece_manager), 
-                                  self.peer_stats[peer["peer_id"]]) for peer in self.peers]
+                # Get peers that have this piece
+                peers_with_piece = []
+                for peer in self.peers:
+                    peer_id = peer["peer_id"]
+                    mock_peer = Peer(peer_id, peer["ip"], peer["port"], self.piece_manager)
+                    try:
+                        if mock_peer.connect():
+                            if peer_id in self.peer_stats:
+                                stats = self.peer_stats[peer_id]
+                                # Check if peer has this piece based on bitfield
+                                if mock_peer.available_pieces[piece_index]:
+                                    peers_with_piece.append((mock_peer, stats))
+                                else:
+                                    mock_peer.close()
+                            else:
+                                mock_peer.close()
+                    except:
+                        if mock_peer:
+                            mock_peer.close()
                 
-                if not available_peers:
+                if not peers_with_piece:
                     with queue_lock:
                         requested_pieces.discard(piece_index)
-                        piece_queue.put(piece_index)
+                        piece_queue.put(piece_index)  # Put back in queue for later
                     time.sleep(1)
                     continue
                 
-                # Round-robin peer selection
-                peer_id = None
-                try:
-                    peer_id = self.peer_priority.get_nowait()
-                    self.peer_priority.put(peer_id)
-                except queue.Empty:
-                    for peer in self.peers:
-                        self.peer_priority.put(peer["peer_id"])
-                    peer_id = self.peer_priority.get_nowait()
-                    self.peer_priority.put(peer_id)
+                # Sort peers by performance weight
+                peers_with_piece.sort(key=lambda p: p[1].weight, reverse=True)
                 
-                selected_peers = [(p, s) for p, s in available_peers if s.peer_id == peer_id]
-                if not selected_peers:
-                    selected_peers = available_peers  # Fallback to any peer
+                if len(peers_with_piece) > 1 and random.random() < 0.3:  # 30% chance to use a different peer
+                    # Pick a random peer from the top half of the list (still biased toward better performers)
+                    random_index = random.randint(0, min(len(peers_with_piece) - 1, 1))
+                    # Move the selected peer to the front
+                    peers_with_piece.insert(0, peers_with_piece.pop(random_index))
+                    logging.info(f"Randomly selected alternate peer {peers_with_piece[0][1].peer_id} for piece {piece_index}")
                 
-                for peer, selected_peer in selected_peers:
+
+                # Try downloading from peers in order
+                success = False
+                for peer, stats in peers_with_piece:
                     if not self.running or self.paused:
                         break
-                    # Prefer peers with more uploads (likely seeders)
-                    if selected_peer.pieces_uploaded > 0:
-                        logging.debug(f"Prioritizing peer {selected_peer.peer_id} with {selected_peer.pieces_uploaded} uploads")
+                    
+                    # Try to download the piece
                     retries = 0
-                    success = False
                     while retries < max_retries and not success and self.running and not self.paused:
-                        logging.info(f"Trying to download piece {piece_index} from {selected_peer.peer_id} ({selected_peer.ip}:{selected_peer.port})")
-                        if peer.connect():
-                            self.active_connections.append(peer)
+                        logging.info(f"Trying to download piece {piece_index} from {stats.peer_id} ({stats.ip}:{stats.port})")
+                        try:
+                            # Peer is already connected from earlier
                             start_time = time.time()
-                            try:
-                                success = peer.download_piece(piece_index, self.peer_id)
-                                elapsed_time = time.time() - start_time
-                                with self.db_lock:
-                                    piece_size = self.piece_manager.expected_piece_length(piece_index)
-                                    self.peer_stats[selected_peer.peer_id].update_download(success, elapsed_time, piece_size)
-                                if success:
-                                    with self.speed_lock:
-                                        self.temp_bytes_downloaded += piece_size
-                                    logging.info(f"Successfully downloaded piece {piece_index} from {selected_peer.peer_id} in {elapsed_time:.2f}s, {piece_size} bytes")
-                                else:
-                                    logging.warning(f"Failed to download piece {piece_index} from {selected_peer.peer_id}")
-                            except Exception as e:
-                                logging.error(f"Error downloading piece {piece_index} from {selected_peer.peer_id}: {e}")
-                                with self.db_lock:
-                                    self.peer_stats[selected_peer.peer_id].update_download(False, 0, 0)
-                                retries += 1
-                            peer.close()
-                            if peer in self.active_connections:
-                                self.active_connections.remove(peer)
-                        else:
-                            logging.warning(f"Failed to connect to {selected_peer.peer_id} ({selected_peer.ip}:{selected_peer.port})")
+                            success = peer.download_piece(piece_index, self.peer_id)
+                            elapsed_time = time.time() - start_time
+                            
                             with self.db_lock:
-                                self.peer_stats[selected_peer.peer_id].update_download(False, 0, 0)
+                                piece_size = self.piece_manager.expected_piece_length(piece_index)
+                                stats.update_download(success, elapsed_time, piece_size)
+                            
+                            if success:
+                                with self.speed_lock:
+                                    self.temp_bytes_downloaded += piece_size
+                                logging.info(f"Successfully downloaded piece {piece_index} from {stats.peer_id} in {elapsed_time:.2f}s")
+                            else:
+                                logging.warning(f"Failed to download piece {piece_index} from {stats.peer_id}")
+                                retries += 1
+                        except Exception as e:
+                            logging.error(f"Error downloading piece {piece_index} from {stats.peer_id}: {e}")
                             retries += 1
-                            time.sleep(2)
+                        finally:
+                            peer.close()
                     
                     if success:
                         break
-                    time.sleep(1)
                 
                 with queue_lock:
                     requested_pieces.discard(piece_index)
                     if not success and self.running and not self.paused:
-                        logging.warning(f"Failed to download piece {piece_index} after {max_retries} retries, requeuing")
+                        logging.warning(f"Failed to download piece {piece_index}, requeuing")
                         piece_queue.put(piece_index)
                         time.sleep(1)
-        
         for i in range(min(max_concurrent, max(1, len(self.peers)))):
             t = threading.Thread(target=download_worker, name=f"DownloadWorker-{i}")
             t.start()
@@ -425,75 +469,141 @@ class Client:
             if port not in EXPECTED_PORT_RANGE and port not in EPHEMERAL_PORT_RANGE:
                 logging.debug(f"Rejecting connection from suspicious port: {addr[0]}:{port}")
                 return
-            conn.settimeout(15)
-            data = conn.recv(1024).decode().strip()
-            if data != "ESTABLISH":
-                logging.debug(f"Invalid initial message from {addr}: {data}")
-                return
-            conn.send("ESTABLISHED".encode())
             
-            while self.running and not self.paused:
-                try:
-                    conn.settimeout(15)
-                    data = conn.recv(1024).decode().strip()
-                    if not data:
-                        logging.debug(f"Empty request from {addr}, closing")
-                        break
-                    if not data.startswith("REQUEST:"):
-                        logging.debug(f"Invalid request from {addr}: {data}")
-                        continue
+            peer_id = f"{addr[0]}:{addr[1]}"
+            
+            # Check if we can give this peer an upload slot
+            allowed_to_upload = False
+            with self.upload_slot_lock:
+                # Clean up stale slots
+                current_time = time.time()
+                self.upload_slots = {pid: last_time for pid, last_time in self.upload_slots.items() 
+                                    if current_time - last_time < 60}  # Remove slots inactive for 60s
+                
+                # Rotate slots if needed
+                if current_time - self.last_slot_rotation > self.slot_rotation_interval:
+                    # Keep only the most recent slot for optimistic unchoking
+                    if self.upload_slots:
+                        newest_peer = max(self.upload_slots.items(), key=lambda x: x[1])[0]
+                        self.upload_slots = {newest_peer: self.upload_slots[newest_peer]}
+                    self.last_slot_rotation = current_time
+                    logging.info("Rotated upload slots")
+                
+                # If peer already has a slot, or we have room, or random chance (optimistic unchoking)
+                if (peer_id in self.upload_slots or 
+                    len(self.upload_slots) < self.max_upload_slots or
+                    random.random() < 0.1):  # 10% chance for optimistic unchoking
                     
+                    self.upload_slots[peer_id] = current_time
+                    allowed_to_upload = True
+                    logging.info(f"Granted upload slot to {peer_id}, slots: {len(self.upload_slots)}/{self.max_upload_slots}")
+                else:
+                    logging.info(f"Denied upload slot to {peer_id}, all slots full")
+                    
+                    # Send a "choked" message and close - optional but follows BitTorrent protocol better
                     try:
-                        piece_index = int(data.split(":")[1])
-                    except (IndexError, ValueError):
-                        logging.debug(f"Malformed request from {addr}: {data}")
-                        continue
+                        conn.send("CHOKED".encode())
+                    except:
+                        pass
+                    return
+            
+            # Continue only if peer is allowed to upload
+            if allowed_to_upload:
+                conn.settimeout(15)
+                data = conn.recv(1024).decode().strip()
+                if data != "ESTABLISH":
+                    logging.debug(f"Invalid initial message from {addr}: {data}")
+                    return
+                conn.send("ESTABLISHED".encode())
+                
+                # Handle bitfield exchange
+                peer_bitfield = None
+                next_data = conn.recv(1024).decode().strip()
+                if next_data.startswith("BITFIELD:"):
+                    # Respond with our own bitfield
+                    bitfield = bytearray((self.piece_manager.total_pieces + 7) // 8)
+                    for i, have in enumerate(self.piece_manager.have_pieces):
+                        if have:
+                            bitfield[i // 8] |= 1 << (7 - (i % 8))
+                    conn.send(f"BITFIELD:{bitfield.hex()}".encode())
                     
-                    logging.info(f"New upload connection from {addr}")
-                    logging.info(f"Seeder received request: {data}")
-                    
-                    peer_id = f"{addr[0]}:{addr[1]}"
-                    read_start = time.time()
-                    piece_data = self.piece_manager._read_piece(piece_index)
-                    read_time = time.time() - read_start
-                    logging.info(f"Read piece {piece_index} in {read_time:.2f}s")
-                    if piece_data:
-                        logging.info(f"Sending piece {piece_index} from {self.base_path}")
-                        total_sent = 0
-                        chunk_size = 4096
-                        for i in range(0, len(piece_data), chunk_size):
-                            if not self.running or self.paused:
-                                break
-                            chunk = piece_data[i:i+chunk_size]
-                            try:
-                                bytes_sent = conn.send(chunk)
-                                total_sent += bytes_sent
-                            except socket.error:
-                                logging.warning(f"Failed to send chunk to {addr}")
-                                break
+                    # Parse peer's bitfield
+                    try:
+                        bitfield_hex = next_data.split(":")[1]
+                        peer_bitfield = bytes.fromhex(bitfield_hex)
+                    except:
+                        logging.warning(f"Failed to parse peer bitfield: {next_data}")
+                
+                while self.running and not self.paused:
+                    try:
+                        conn.settimeout(15)
+                        data = conn.recv(1024).decode().strip()
+                        if not data:
+                            logging.debug(f"Empty request from {addr}, closing")
+                            break
+                        if not data.startswith("REQUEST:"):
+                            logging.debug(f"Invalid request from {addr}: {data}")
+                            continue
                         
-                                               
-                        if total_sent == len(piece_data):
-                            with self.speed_lock:
-                                self.temp_bytes_uploaded += total_sent
-                                logging.info(f"Added {total_sent} bytes to upload counter, now {self.temp_bytes_uploaded}")
-                            if peer_id not in self.peer_stats:
-                                self.peer_stats[peer_id] = PeerStats(peer_id, addr[0], addr[1])
-                            self.peer_stats[peer_id].update_upload(total_sent)
-                            logging.info(f"Successfully sent piece {piece_index} to {addr}: {total_sent} bytes")
+                        try:
+                            piece_index = int(data.split(":")[1])
+                        except (IndexError, ValueError):
+                            logging.debug(f"Malformed request from {addr}: {data}")
+                            continue
+                        
+                        # Update the slot's last activity time
+                        with self.upload_slot_lock:
+                            self.upload_slots[peer_id] = time.time()
+                        
+                        logging.info(f"New upload connection from {addr}")
+                        logging.info(f"Seeder received request: {data}")
+                        
+                        read_start = time.time()
+                        piece_data = self.piece_manager._read_piece(piece_index)
+                        read_time = time.time() - read_start
+                        logging.info(f"Read piece {piece_index} in {read_time:.2f}s")
+                        
+                        if piece_data:
+                            logging.info(f"Sending piece {piece_index} from {self.base_path}")
+                            total_sent = 0
+                            chunk_size = 4096
+                            for i in range(0, len(piece_data), chunk_size):
+                                if not self.running or self.paused:
+                                    break
+                                chunk = piece_data[i:i+chunk_size]
+                                try:
+                                    bytes_sent = conn.send(chunk)
+                                    total_sent += bytes_sent
+                                except socket.error:
+                                    logging.warning(f"Failed to send chunk to {addr}")
+                                    break
+                            
+                            if total_sent == len(piece_data):
+                                with self.speed_lock:
+                                    self.temp_bytes_uploaded += total_sent
+                                    logging.info(f"Added {total_sent} bytes to upload counter, now {self.temp_bytes_uploaded}")
+                                
+                                if peer_id not in self.peer_stats:
+                                    self.peer_stats[peer_id] = PeerStats(peer_id, addr[0], addr[1])
+                                self.peer_stats[peer_id].update_upload(total_sent)
+                                logging.info(f"Successfully sent piece {piece_index} to {addr}: {total_sent} bytes")
+                            else:
+                                logging.warning(f"Failed to send complete piece {piece_index}: sent {total_sent}/{len(piece_data)}")
                         else:
-                            logging.warning(f"Failed to send complete piece {piece_index}: sent {total_sent}/{len(piece_data)}")
-                    else:
-                        logging.warning(f"Piece {piece_index} not available")
-                except socket.timeout:
-                    logging.debug(f"Timeout waiting for request from {addr}")
-                    break
-                except Exception as e:
-                    logging.error(f"Upload request error from {addr}: {e}")
-                    break
+                            logging.warning(f"Piece {piece_index} not available")
+                    except socket.timeout:
+                        logging.debug(f"Timeout waiting for request from {addr}")
+                        break
+                    except Exception as e:
+                        logging.error(f"Upload request error from {addr}: {e}")
+                        break
         except Exception as e:
             logging.debug(f"Upload error from {addr}: {e}")
         finally:
+            # Clean up slot when done
+            with self.upload_slot_lock:
+                if peer_id in self.upload_slots:
+                    del self.upload_slots[peer_id]
             conn.close()
 
     def listen_for_requests(self):
