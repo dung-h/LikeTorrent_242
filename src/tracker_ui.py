@@ -26,11 +26,11 @@ class TrackerGUI:
         self.tracker = Tracker()
         self.running = True
         self.ui_lock = threading.Lock()
-
+    
         # Main frame
         self.main_frame = ttk.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
+    
         # Create notebook for tabs
         self.notebook = ttk.Notebook(self.main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -75,24 +75,24 @@ class TrackerGUI:
         self.peers_tree.heading("IP", text="IP Address")
         self.peers_tree.heading("Port", text="Port")
         self.peers_tree.heading("Torrent", text="Torrent Hash")
-        self.peers_tree.heading("Event", text="Event")
-        self.peers_tree.heading("Downloaded", text="Downloaded")
-        self.peers_tree.heading("Uploaded", text="Uploaded")
+        self.peers_tree.heading("Event", text="Status")  # Changed to Status for clarity
+        self.peers_tree.heading("Downloaded", text="Downloaded (MB)")
+        self.peers_tree.heading("Uploaded", text="Uploaded (MB)")
         self.peers_tree.heading("DownRate", text="Down KB/s")
         self.peers_tree.heading("UpRate", text="Up KB/s")
         
-        # Set column widths
+        # Set column widths for peers
         self.peers_tree.column("PeerID", width=100)
         self.peers_tree.column("IP", width=100)
         self.peers_tree.column("Port", width=60)
         self.peers_tree.column("Torrent", width=100)
-        self.peers_tree.column("Event", width=80)
-        self.peers_tree.column("Downloaded", width=100)
-        self.peers_tree.column("Uploaded", width=100)
+        self.peers_tree.column("Event", width=120)  # Widened for status+type
+        self.peers_tree.column("Downloaded", width=120)
+        self.peers_tree.column("Uploaded", width=120)
         self.peers_tree.column("DownRate", width=80)
         self.peers_tree.column("UpRate", width=80)
         
-        # Add scrollbar and packing
+        # Add scrollbar and packing for peers
         self.peers_scrollbar = ttk.Scrollbar(self.peers_tab, orient=tk.VERTICAL, command=self.peers_tree.yview)
         self.peers_tree.configure(yscrollcommand=self.peers_scrollbar.set)
         self.peers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -106,14 +106,16 @@ class TrackerGUI:
         self.torrents_tree = ttk.Treeview(self.torrents_tab, 
             columns=("Hash", "Peers", "Complete", "Incomplete", "Downloaded", "Uploaded"), 
             show="headings")
+        
+        # FIXED: Setting headings on the correct tree
         self.torrents_tree.heading("Hash", text="Torrent Hash")
         self.torrents_tree.heading("Peers", text="Peers")
         self.torrents_tree.heading("Complete", text="Complete")
         self.torrents_tree.heading("Incomplete", text="Incomplete")
-        self.torrents_tree.heading("Downloaded", text="Total Downloaded")
-        self.torrents_tree.heading("Uploaded", text="Total Uploaded")
+        self.torrents_tree.heading("Downloaded", text="Downloaded (MB)")  # Fixed
+        self.torrents_tree.heading("Uploaded", text="Uploaded (MB)")      # Fixed
         
-        # Set column widths
+        # Set column widths for torrents
         self.torrents_tree.column("Hash", width=200)
         self.torrents_tree.column("Peers", width=60)
         self.torrents_tree.column("Complete", width=80)
@@ -121,7 +123,7 @@ class TrackerGUI:
         self.torrents_tree.column("Downloaded", width=120)
         self.torrents_tree.column("Uploaded", width=120)
         
-        # Add scrollbar and packing
+        # Add scrollbar and packing for torrents
         self.torrents_scrollbar = ttk.Scrollbar(self.torrents_tab, orient=tk.VERTICAL, command=self.torrents_tree.yview)
         self.torrents_tree.configure(yscrollcommand=self.torrents_scrollbar.set)
         self.torrents_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -189,6 +191,25 @@ class TrackerGUI:
         except Exception as e:
             logging.error(f"Filter error: {e}")
 
+        # Add a method to identify peer type (seeder/leecher) based on their stats
+    def get_peer_type(self, peer):
+        downloaded = float(peer.get("downloaded", 0))
+        uploaded = float(peer.get("uploaded", 0))
+        event = peer.get("event", "").lower()
+        seeding_flag = peer.get("seeding", False)  # New field client sends
+        
+        # Consider a peer a seeder if:
+        # 1. Their event is "completed"
+        # 2. They've uploaded more than they've downloaded
+        # 3. They explicitly report seeding=True
+        # 4. They have a "started" event but are no longer downloading (rate near 0)
+        if (event == "completed" or 
+            uploaded > downloaded or 
+            seeding_flag or 
+            (event == "started" and float(peer.get("download_rate", 0)) < 0.1 and downloaded > 0)):
+            return "Seeder"
+        else:
+            return "Leecher"
     def update_ui(self):
         if not self.running:
             return
@@ -217,7 +238,7 @@ class TrackerGUI:
                         total_down = sum(p.get("downloaded", 0) for p in peers.values())
                         total_up = sum(p.get("uploaded", 0) for p in peers.values())
                         
-                        # Add to torrent tree
+                        # Add torrent to torrent tree
                         self.torrents_tree.insert("", tk.END, values=(
                             torrent_hash[:15] + "..." if len(torrent_hash) > 15 else torrent_hash,
                             len(peers),
@@ -235,6 +256,8 @@ class TrackerGUI:
                                 downloaded = float(peer.get("downloaded", 0))
                                 uploaded = float(peer.get("uploaded", 0))
                                 
+                                peer_type = self.get_peer_type(peer)
+                                
                                 total_download_rate += download_rate
                                 total_upload_rate += upload_rate
                                 
@@ -244,7 +267,7 @@ class TrackerGUI:
                                     peer.get("ip", "unknown"),
                                     peer.get("port", "unknown"),
                                     torrent_hash[:10] + "..." if len(torrent_hash) > 10 else torrent_hash,
-                                    peer.get("event", "unknown"),
+                                    f"{peer.get('event', 'unknown')} ({peer_type})",
                                     f"{downloaded/1024/1024:.2f} MB",
                                     f"{uploaded/1024/1024:.2f} MB",
                                     f"{download_rate:.2f}",
@@ -260,7 +283,7 @@ class TrackerGUI:
                     self.announce_label.config(text=f"Announces: {self.tracker.announce_count}")
                     self.bandwidth_label.config(text=f"Total: {total_download_rate:.2f} KB/s ↓ | {total_upload_rate:.2f} KB/s ↑")
                     
-                    # Initialize arrays on first run
+                    # Rest of the graph update code...
                     if not hasattr(self, 'first_time') or self.first_time is None:
                         self.first_time = time.time()
                         self.time_history = [0]
